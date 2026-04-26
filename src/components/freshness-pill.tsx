@@ -1,4 +1,10 @@
 import { useEffect, useState } from "react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -8,37 +14,100 @@ interface Props {
   className?: string;
 }
 
+type Freshness = "fresh" | "stale" | "disconnected" | "unknown";
+
 /**
- * Tiny "last updated Ns ago" pill with a heartbeat dot. Re-renders once a
- * second so the relative timestamp ticks live.
+ * Quiet freshness indicator — a single colored dot that signals data
+ * staleness at a glance without animating in the user's peripheral vision.
+ *
+ * Color encodes state:
+ * - green: fresh (data updated within ~2× the polling interval)
+ * - amber: stale (a poll likely missed)
+ * - red:   disconnected (no successful update in a long time, or never)
+ *
+ * Hover the dot for the exact "Last updated <iso> (Ns ago)" tooltip — the
+ * detail is still there for anyone who wants it, but the headline view is
+ * just one static-looking pixel of color.
+ *
+ * Re-renders once every five seconds (slow enough to not draw the eye, fast
+ * enough that the dot turns amber within a few seconds of becoming stale).
  */
-export function FreshnessPill({ lastUpdated, loading, intervalMs, className }: Props) {
+export function FreshnessPill({ lastUpdated, intervalMs, className }: Props) {
   const [, setTick] = useState(0);
   useEffect(() => {
-    const id = window.setInterval(() => setTick((t) => t + 1), 1000);
+    const id = window.setInterval(() => setTick((t) => t + 1), 5000);
     return () => window.clearInterval(id);
   }, []);
 
-  // Background polling is intentionally silent — we never surface a "loading"
-  // word here. The heartbeat dot pulses regardless to signal liveness; the
-  // timestamp ticks once a second so staleness is visible.
-  const label = (() => {
-    if (!lastUpdated) return "—";
-    const diff = Math.max(0, Math.round((Date.now() - lastUpdated) / 1000));
-    if (diff < 2) return "just now";
-    return `${diff}s ago`;
-  })();
+  const status = classify(lastUpdated, intervalMs);
+
+  const dotClass = {
+    fresh: "bg-[var(--success)]",
+    stale: "bg-[var(--warning)]",
+    disconnected: "bg-[var(--destructive)]",
+    unknown: "bg-muted-foreground/40",
+  }[status];
+
+  const ringClass = {
+    fresh: "ring-[color-mix(in_oklab,var(--success)_30%,transparent)]",
+    stale: "ring-[color-mix(in_oklab,var(--warning)_30%,transparent)]",
+    disconnected: "ring-[color-mix(in_oklab,var(--destructive)_30%,transparent)]",
+    unknown: "ring-transparent",
+  }[status];
 
   return (
-    <div
-      className={cn(
-        "inline-flex items-center gap-2 rounded-md border border-border bg-surface px-2 py-1 font-mono text-[11px] text-muted-foreground",
-        className,
-      )}
-      title={`Auto-refresh every ${Math.round(intervalMs / 1000)}s${loading ? " (refreshing now)" : ""}`}
-    >
-      <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--success)] pulse-dot" />
-      <span className="text-tabular">{label}</span>
-    </div>
+    <TooltipProvider delayDuration={200}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            className={cn(
+              "inline-flex h-6 w-6 items-center justify-center rounded-md border border-border bg-surface hover:border-border-strong",
+              className,
+            )}
+            aria-label={tooltipText(lastUpdated, status)}
+          >
+            <span
+              className={cn(
+                "inline-block h-2 w-2 rounded-full ring-2",
+                dotClass,
+                ringClass,
+              )}
+            />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" className="font-mono text-[11px]">
+          {tooltipText(lastUpdated, status)}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
+}
+
+function classify(lastUpdated: number | null, intervalMs: number): Freshness {
+  if (!lastUpdated) return "unknown";
+  const ageMs = Math.max(0, Date.now() - lastUpdated);
+  // Fresh while we're within ~2× the polling cadence (one missed tick is OK).
+  if (ageMs <= intervalMs * 2) return "fresh";
+  // Stale once we've missed several ticks but still within ~30s.
+  if (ageMs <= 30_000) return "stale";
+  return "disconnected";
+}
+
+function tooltipText(lastUpdated: number | null, status: Freshness): string {
+  if (!lastUpdated) {
+    if (status === "disconnected") return "Disconnected — no data received";
+    return "Awaiting first update";
+  }
+  const ageS = Math.max(0, Math.round((Date.now() - lastUpdated) / 1000));
+  const iso = new Date(lastUpdated).toISOString().replace("T", " ").slice(0, 19);
+  const ageLabel =
+    ageS < 2 ? "just now" : ageS < 60 ? `${ageS}s ago` : `${Math.floor(ageS / 60)}m ago`;
+  const headline = {
+    fresh: "Fresh",
+    stale: "Stale — last poll missed",
+    disconnected: "Disconnected",
+    unknown: "Awaiting first update",
+  }[status];
+  return `${headline} · last updated ${iso} UTC (${ageLabel})`;
 }

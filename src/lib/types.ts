@@ -23,6 +23,13 @@ export interface Experiment {
   // Optional, may be present in future API versions; falls back gracefully
   repo?: string | null;
   state_history?: { state: ExperimentState; at: string }[];
+  /**
+   * URL to the experiment's Linear writeup. When present, the dashboard's
+   * "Linear doc" link points here. When missing, the dashboard falls back to
+   * a Linear search URL — that's a soft landing, not a guarantee the doc
+   * exists.
+   */
+  linear_doc_url?: string | null;
 }
 
 export interface RunMetricRef {

@@ -5,7 +5,6 @@ import {
   ArrowLeft,
   ChevronDown,
   ExternalLink,
-  Filter as FilterIcon,
   Plus,
   Search,
 } from "lucide-react";
@@ -105,8 +104,9 @@ function ExperimentPage() {
 }
 
 interface VersionInfo {
-  /** "v1", "v2", … (1-indexed, oldest first). */
+  /** "v1", "v2", … (1-indexed, oldest first). Derived ordinal label. */
   label: string;
+  /** The underlying run — has its own identity (hash + name) independent of the version. */
   run: Run;
 }
 
@@ -179,37 +179,47 @@ function ExperimentBody({
   const [comparison, setComparison] = useState<ComparisonRunPick[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
 
-  // The "primary" run shown in charts is just the selected version.
-  // Comparison overlays are appended; switching versions does NOT clear them.
+  // The dashboard's job is to compare runs *within* an experiment. Default
+  // view = every run of this experiment overlaid, plus comparison runs from
+  // other experiments. The version selector pins which version external
+  // links reference (and visually highlights it), but it never reduces the
+  // view to a single run — that would defeat cross-run comparison.
   const allRuns = useMemo(() => {
-    const native: ComparisonRunPick[] = selectedVersion
-      ? [
-          {
-            hash: selectedVersion.run.hash,
-            name: selectedVersion.label,
-            experiment: selectedVersion.run.experiment,
-          },
-        ]
-      : [];
-    return [...native, ...comparison.filter((c) => !native.find((n) => n.hash === c.hash))];
-  }, [selectedVersion, comparison]);
+    const native: ComparisonRunPick[] = versions.map((v) => ({
+      hash: v.run.hash,
+      name: v.run.name,
+      experiment: v.run.experiment,
+    }));
+    return [
+      ...native,
+      ...comparison.filter((c) => !native.find((n) => n.hash === c.hash)),
+    ];
+  }, [versions, comparison]);
 
-  // Per-run metadata: active flag + creationMs (for wall-time x-axis).
+  // Per-run metadata: active flag + creationMs (for wall-time x-axis) +
+  // the version label so we can show "v3" alongside the run's identity.
   const runMeta = useMemo(() => {
     const map: Record<
       string,
-      { active: boolean; creationMs: number; experiment: string; name: string }
+      {
+        active: boolean;
+        creationMs: number;
+        experiment: string;
+        name: string;
+        version?: string;
+      }
     > = {};
-    if (selectedVersion) {
-      const r = selectedVersion.run;
+    for (const v of versions) {
+      const r = v.run;
       map[r.hash] = {
         active: r.active,
         creationMs: new Date(r.creation_time).getTime(),
         experiment: r.experiment,
-        name: selectedVersion.label,
+        name: r.name,
+        version: v.label,
       };
     }
-    // Comparison runs default to inactive — we don't poll them.
+    // Comparison runs from other experiments — we don't poll them, no version label.
     for (const c of comparison) {
       map[c.hash] ??= {
         active: false,
@@ -219,7 +229,7 @@ function ExperimentBody({
       };
     }
     return map;
-  }, [selectedVersion, comparison]);
+  }, [versions, comparison]);
 
   // Sidebar: per-run visibility toggles
   const [hiddenRuns, setHiddenRuns] = useState<Set<string>>(new Set());
@@ -353,11 +363,15 @@ function ExperimentBody({
                 </button>
               )}
               <a
-                href={linearDocUrl(experimentName)}
+                href={experiment?.linear_doc_url || linearSearchFallback(experimentName)}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:border-border-strong"
-                title="Open the experiment writeup in Linear"
+                title={
+                  experiment?.linear_doc_url
+                    ? "Open the experiment writeup in Linear"
+                    : "No Linear doc URL recorded — opening Linear search as a fallback"
+                }
               >
                 Linear doc
                 <ExternalLink className="h-3 w-3" />
@@ -441,56 +455,57 @@ function ExperimentBody({
               </p>
             </div>
 
-            {/* Filter + show-all/none */}
-            <div className="rounded-lg border border-border bg-card p-3 space-y-2">
-              <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                Runs
-              </div>
-              <div className="relative">
-                <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground" />
-                <input
-                  value={runFilter}
-                  onChange={(e) => setRunFilter(e.target.value)}
-                  placeholder="Filter runs…"
-                  className="w-full rounded-md border border-border bg-surface pl-7 pr-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
-                />
-              </div>
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={() => setHiddenRuns(new Set())}
-                  disabled={noneHidden}
-                  className="flex-1 rounded border border-border bg-surface py-1 text-[10px] uppercase tracking-wider text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-default"
-                >
-                  Show all
-                </button>
-                <button
-                  onClick={() =>
-                    setHiddenRuns(new Set(visibleRuns.map((r) => r.hash)))
-                  }
-                  disabled={allHidden}
-                  className="flex-1 rounded border border-border bg-surface py-1 text-[10px] uppercase tracking-wider text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-default"
-                >
-                  Show none
-                </button>
-              </div>
-              <button
-                onClick={() => setModalOpen(true)}
-                className="w-full inline-flex items-center justify-center gap-1.5 rounded-md border border-primary/40 bg-[color-mix(in_oklab,var(--primary)_12%,transparent)] py-1.5 text-xs font-medium text-foreground hover:bg-[color-mix(in_oklab,var(--primary)_20%,transparent)] transition-colors"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                Add comparison runs
-              </button>
-            </div>
-
-            {/* Legend */}
+            {/* Runs — single consolidated panel: filter, show-all/none, add-comparison,
+                and the legend list with per-row visibility toggles. The legend IS the
+                runs list; splitting them into two boxes was duplication. */}
             <div className="rounded-lg border border-border bg-card overflow-hidden">
-              <div className="flex items-center justify-between px-3 py-2 border-b border-border">
-                <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                  Legend ({visibleRuns.length})
-                </span>
-                <FilterIcon className="h-3 w-3 text-muted-foreground" />
+              <div className="px-3 pt-3 pb-2 space-y-2 border-b border-border">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                    Runs ({visibleRuns.length})
+                  </span>
+                  {selectedVersion && (
+                    <span className="text-[10px] font-mono text-muted-foreground">
+                      pinned: {selectedVersion.label}
+                    </span>
+                  )}
+                </div>
+                <div className="relative">
+                  <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground" />
+                  <input
+                    value={runFilter}
+                    onChange={(e) => setRunFilter(e.target.value)}
+                    placeholder="Filter runs…"
+                    className="w-full rounded-md border border-border bg-surface pl-7 pr-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setHiddenRuns(new Set())}
+                    disabled={noneHidden}
+                    className="flex-1 rounded border border-border bg-surface py-1 text-[10px] uppercase tracking-wider text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-default"
+                  >
+                    Show all
+                  </button>
+                  <button
+                    onClick={() =>
+                      setHiddenRuns(new Set(visibleRuns.map((r) => r.hash)))
+                    }
+                    disabled={allHidden}
+                    className="flex-1 rounded border border-border bg-surface py-1 text-[10px] uppercase tracking-wider text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-default"
+                  >
+                    Show none
+                  </button>
+                </div>
+                <button
+                  onClick={() => setModalOpen(true)}
+                  className="w-full inline-flex items-center justify-center gap-1.5 rounded-md border border-primary/40 bg-[color-mix(in_oklab,var(--primary)_12%,transparent)] py-1.5 text-xs font-medium text-foreground hover:bg-[color-mix(in_oklab,var(--primary)_20%,transparent)] transition-colors"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  Add comparison runs
+                </button>
               </div>
-              <ul className="max-h-[280px] overflow-y-auto scrollbar-thin divide-y divide-border">
+              <ul className="max-h-[320px] overflow-y-auto scrollbar-thin divide-y divide-border">
                 {visibleRuns.length === 0 && (
                   <li className="px-3 py-4 text-center text-xs text-muted-foreground">
                     No runs match.
@@ -500,12 +515,16 @@ function ExperimentBody({
                   const hidden = hiddenRuns.has(r.hash);
                   const meta = runMeta[r.hash];
                   const isComparison = comparison.some((c) => c.hash === r.hash);
+                  const isPinned =
+                    !isComparison &&
+                    selectedVersion?.run.hash === r.hash;
                   return (
                     <li
                       key={r.hash}
                       className={cn(
                         "group flex items-center gap-2 px-3 py-1.5 hover:bg-muted/50",
                         hidden && "opacity-50",
+                        isPinned && "bg-[color-mix(in_oklab,var(--primary)_8%,transparent)]",
                       )}
                     >
                       <button
@@ -526,7 +545,12 @@ function ExperimentBody({
                         />
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-1.5">
-                            <span className="font-mono text-[10px] text-muted-foreground">
+                            {meta?.version && (
+                              <span className="font-mono text-[10px] text-foreground/80 shrink-0">
+                                {meta.version}
+                              </span>
+                            )}
+                            <span className="font-mono text-[10px] text-muted-foreground shrink-0">
                               {shortHash(r.hash)}
                             </span>
                             <span className="truncate text-xs">{r.name}</span>
@@ -612,8 +636,19 @@ function ExperimentBody({
               </div>
             )}
 
-            {/* Stats footer */}
-            <RunStatsTable runs={runsState.data ?? []} />
+            {/* Per-run stats — table form with one row per version. Click a row
+                to pin the URL/links to that version. */}
+            <RunStatsTable
+              versions={versions}
+              runColors={runColors}
+              pinnedHash={selectedVersion?.run.hash}
+              onPinHash={(label) =>
+                navigate({
+                  to: "/experiment",
+                  search: { name: experimentName, version: label },
+                })
+              }
+            />
           </aside>
         </div>
       </div>
@@ -657,49 +692,105 @@ function SegButton({
   );
 }
 
-function RunStatsTable({ runs }: { runs: Run[] }) {
-  if (runs.length === 0) return null;
-  const losses = runs
-    .map((r) => r.final_loss)
-    .filter((v): v is number => v != null && isFinite(v));
-  const best = losses.length > 0 ? Math.min(...losses) : null;
-  const median =
-    losses.length > 0
-      ? losses.slice().sort((a, b) => a - b)[Math.floor(losses.length / 2)]
-      : null;
-  const totalDuration = runs.reduce((sum, r) => sum + (r.duration ?? 0), 0);
+/**
+ * Per-run stats table for the sidebar. One row per version of the
+ * experiment; columns surface what a researcher actually wants to scan
+ * across runs (version, identity, status, duration, final metric).
+ *
+ * Aggregate stats (best across runs, median, etc.) belong in a *table* the
+ * researcher can read row-by-row, not in a four-cell `dl` that hides which
+ * run the "best loss" came from. The table fills the same role with much
+ * more signal per pixel.
+ */
+function RunStatsTable({
+  versions,
+  runColors,
+  pinnedHash,
+  onPinHash,
+}: {
+  versions: VersionInfo[];
+  runColors: Record<string, string>;
+  pinnedHash: string | undefined;
+  onPinHash: (versionLabel: string) => void;
+}) {
+  if (versions.length === 0) return null;
+  // Newest first so the latest run is most reachable when scanning.
+  const ordered = [...versions].reverse();
   return (
-    <div className="rounded-lg border border-border bg-card p-3">
-      <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground mb-2">
+    <div className="rounded-lg border border-border bg-card overflow-hidden">
+      <div className="px-3 py-2 border-b border-border text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
         Run stats
       </div>
-      <dl className="grid grid-cols-2 gap-y-1.5 gap-x-3 text-xs font-mono">
-        <dt className="text-muted-foreground">Best loss</dt>
-        <dd className="text-right text-tabular">
-          {best != null ? best.toFixed(4) : "—"}
-        </dd>
-        <dt className="text-muted-foreground">Median</dt>
-        <dd className="text-right text-tabular">
-          {median != null ? median.toFixed(4) : "—"}
-        </dd>
-        <dt className="text-muted-foreground">Σ duration</dt>
-        <dd className="text-right text-tabular">{formatDuration(totalDuration)}</dd>
-        <dt className="text-muted-foreground">Active</dt>
-        <dd className="text-right text-tabular">
-          {runs.filter((r) => r.active).length}
-        </dd>
-      </dl>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[11px] font-mono">
+          <thead className="text-[10px] uppercase tracking-wider text-muted-foreground bg-muted/40">
+            <tr>
+              <th className="text-left px-2 py-1.5 font-medium">ver</th>
+              <th className="text-left px-2 py-1.5 font-medium">run</th>
+              <th className="text-right px-2 py-1.5 font-medium">final</th>
+              <th className="text-right px-2 py-1.5 font-medium">dur</th>
+              <th className="text-right px-2 py-1.5 font-medium">state</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border">
+            {ordered.map((v) => {
+              const r = v.run;
+              const isPinned = pinnedHash === r.hash;
+              const stateLabel = r.active ? "live" : r.end_time ? "done" : "—";
+              return (
+                <tr
+                  key={r.hash}
+                  onClick={() => onPinHash(v.label)}
+                  className={cn(
+                    "cursor-pointer hover:bg-muted/50",
+                    isPinned && "bg-[color-mix(in_oklab,var(--primary)_8%,transparent)]",
+                  )}
+                  title={`Pin links to ${v.label} — ${r.name}`}
+                >
+                  <td className="px-2 py-1.5 align-middle">
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        className="h-1.5 w-1.5 rounded-sm shrink-0"
+                        style={{ backgroundColor: runColors[r.hash] ?? "#888" }}
+                      />
+                      <span className="text-foreground">{v.label}</span>
+                    </div>
+                  </td>
+                  <td className="px-2 py-1.5 align-middle truncate max-w-[110px] text-muted-foreground">
+                    {shortHash(r.hash)}
+                  </td>
+                  <td className="px-2 py-1.5 align-middle text-right text-tabular">
+                    {r.final_loss != null ? r.final_loss.toFixed(4) : "—"}
+                  </td>
+                  <td className="px-2 py-1.5 align-middle text-right text-tabular text-muted-foreground">
+                    {formatDuration(r.duration ?? 0)}
+                  </td>
+                  <td
+                    className={cn(
+                      "px-2 py-1.5 align-middle text-right",
+                      r.active && "text-[var(--info)]",
+                      !r.active && r.end_time && "text-muted-foreground",
+                    )}
+                  >
+                    {stateLabel}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
 
 /**
- * Build a Linear search URL for the experiment writeup. The Astrolabe
- * convention is one Linear issue per experiment with the experiment name in
- * the title; opening Linear's search with the name lands on the right doc
- * even when the URL slug doesn't match exactly.
+ * Soft-landing fallback when the experiment record has no recorded
+ * `linear_doc_url`. Opens Linear's search with the experiment name so the
+ * user can still find the doc — but this is a last resort, not the primary
+ * link target. Real backends should populate `linear_doc_url` directly.
  */
-function linearDocUrl(experimentName: string): string {
+function linearSearchFallback(experimentName: string): string {
   const q = encodeURIComponent(experimentName);
   return `https://linear.app/search?q=${q}`;
 }
@@ -804,15 +895,20 @@ function VersionSelector({
                       setOpen(false);
                     }}
                     className={cn(
-                      "w-full text-left px-3 py-1.5 text-xs font-mono hover:bg-muted flex items-center justify-between",
+                      "w-full text-left px-3 py-1.5 text-xs font-mono hover:bg-muted flex items-center justify-between gap-3",
                       isSelected && "bg-[color-mix(in_oklab,var(--primary)_10%,transparent)]",
                     )}
                     role="menuitem"
+                    title={`${v.run.name} — ${formatTimestamp(v.run.creation_time)}`}
                   >
-                    <span className="text-foreground">{v.label}</span>
+                    <span className="flex items-center gap-2 min-w-0">
+                      <span className="text-foreground shrink-0">{v.label}</span>
+                      <span className="text-[10px] text-muted-foreground truncate">
+                        {shortHash(v.run.hash)} · {v.run.name}
+                      </span>
+                    </span>
                     <span
-                      className="text-[10px] text-muted-foreground text-tabular"
-                      title={formatTimestamp(v.run.creation_time)}
+                      className="text-[10px] text-muted-foreground text-tabular shrink-0"
                     >
                       {formatRelative(v.run.creation_time)}
                     </span>
