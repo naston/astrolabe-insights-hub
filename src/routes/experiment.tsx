@@ -692,3 +692,137 @@ function RunStatsTable({ runs }: { runs: Run[] }) {
     </div>
   );
 }
+
+/**
+ * Build a Linear search URL for the experiment writeup. The Astrolabe
+ * convention is one Linear issue per experiment with the experiment name in
+ * the title; opening Linear's search with the name lands on the right doc
+ * even when the URL slug doesn't match exactly.
+ */
+function linearDocUrl(experimentName: string): string {
+  const q = encodeURIComponent(experimentName);
+  return `https://linear.app/search?q=${q}`;
+}
+
+interface VersionSelectorProps {
+  versions: VersionInfo[];
+  selectedLabel: string | undefined;
+  pinnedLatest: boolean;
+  onSelect: (label: string) => void;
+}
+
+function VersionSelector({
+  versions,
+  selectedLabel,
+  pinnedLatest,
+  onSelect,
+}: VersionSelectorProps) {
+  const [open, setOpen] = useState(false);
+
+  // Close on outside click / Escape
+  useEffect(() => {
+    if (!open) return;
+    const onClick = () => setOpen(false);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("click", onClick);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", onClick);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  if (versions.length === 0) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-md border border-border bg-surface px-2 py-1 text-[11px] font-mono text-muted-foreground">
+        no versions
+      </span>
+    );
+  }
+
+  // Newest first in the dropdown
+  const ordered = [...versions].reverse();
+  const latest = versions[versions.length - 1];
+
+  return (
+    <div className="relative" onClick={(e) => e.stopPropagation()}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className={cn(
+          "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-mono",
+          pinnedLatest
+            ? "border-border bg-surface text-muted-foreground hover:text-foreground"
+            : "border-primary/40 bg-[color-mix(in_oklab,var(--primary)_12%,transparent)] text-foreground",
+        )}
+        title="Switch version"
+      >
+        <span className="text-tabular text-foreground font-medium">
+          {selectedLabel ?? "—"}
+        </span>
+        <span className="opacity-60">of {versions.length}</span>
+        {pinnedLatest && (
+          <span className="rounded bg-muted px-1 py-px text-[9px] uppercase tracking-wider text-muted-foreground">
+            latest
+          </span>
+        )}
+        <ChevronDown className="h-3 w-3 opacity-60" />
+      </button>
+      {open && (
+        <div
+          className="absolute left-0 top-full z-40 mt-1 w-64 rounded-md border border-border bg-popover shadow-xl overflow-hidden"
+          role="menu"
+        >
+          <button
+            onClick={() => {
+              onSelect("latest");
+              setOpen(false);
+            }}
+            className={cn(
+              "w-full text-left px-3 py-2 text-xs font-mono hover:bg-muted flex items-center justify-between border-b border-border",
+              pinnedLatest && "bg-[color-mix(in_oklab,var(--primary)_10%,transparent)]",
+            )}
+            role="menuitem"
+          >
+            <span className="flex items-center gap-2">
+              <span className="text-foreground font-medium">latest</span>
+              <span className="text-muted-foreground">→ {latest.label}</span>
+            </span>
+            <span className="text-[10px] text-muted-foreground">
+              tracks newest
+            </span>
+          </button>
+          <ul className="max-h-[280px] overflow-y-auto scrollbar-thin">
+            {ordered.map((v) => {
+              const isSelected = v.label === selectedLabel && !pinnedLatest;
+              return (
+                <li key={v.label}>
+                  <button
+                    onClick={() => {
+                      onSelect(v.label);
+                      setOpen(false);
+                    }}
+                    className={cn(
+                      "w-full text-left px-3 py-1.5 text-xs font-mono hover:bg-muted flex items-center justify-between",
+                      isSelected && "bg-[color-mix(in_oklab,var(--primary)_10%,transparent)]",
+                    )}
+                    role="menuitem"
+                  >
+                    <span className="text-foreground">{v.label}</span>
+                    <span
+                      className="text-[10px] text-muted-foreground text-tabular"
+                      title={formatTimestamp(v.run.creation_time)}
+                    >
+                      {formatRelative(v.run.creation_time)}
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
