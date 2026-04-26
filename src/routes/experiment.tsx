@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { zodValidator, fallback } from "@tanstack/zod-adapter";
 import { z } from "zod";
 import { ArrowLeft, Filter as FilterIcon, Plus, Search } from "lucide-react";
 
@@ -31,11 +30,11 @@ import { ShortcutsHelp } from "@/components/shortcuts-help";
 import { useGlobalShortcuts } from "@/hooks/use-global-shortcuts";
 
 const searchSchema = z.object({
-  name: fallback(z.string(), "").default(""),
+  name: z.string().catch("").default(""),
 });
 
 export const Route = createFileRoute("/experiment")({
-  validateSearch: zodValidator(searchSchema),
+  validateSearch: (search: Record<string, unknown>) => searchSchema.parse(search),
   head: ({ match }) => {
     const name = (match.search as { name?: string }).name ?? "Experiment";
     return {
