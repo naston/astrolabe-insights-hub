@@ -38,6 +38,8 @@ import { useGlobalShortcuts } from "@/hooks/use-global-shortcuts";
 
 const searchSchema = z.object({
   name: z.string().catch("").default(""),
+  // `version` is "latest" or "vN" (1-indexed, oldest = v1).
+  version: z.string().catch("latest").default("latest"),
 });
 
 export const Route = createFileRoute("/experiment")({
