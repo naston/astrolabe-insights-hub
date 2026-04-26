@@ -1,7 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { z } from "zod";
-import { ArrowLeft, Filter as FilterIcon, Plus, Search } from "lucide-react";
+import {
+  ArrowLeft,
+  ChevronDown,
+  ExternalLink,
+  Filter as FilterIcon,
+  Plus,
+  Search,
+} from "lucide-react";
 
 import { api, DEFAULT_PALETTE } from "@/lib/api";
 import type { Experiment, Run } from "@/lib/types";
