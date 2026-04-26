@@ -104,6 +104,10 @@ export function seedExperiments(): Experiment[] {
   const t = now();
   return SPECS.map((s) => {
     const startedAt = new Date(t - s.latestAgeSec * 1000).toISOString();
+    // Stable Linear-doc URL slug derived from the experiment name. Real
+    // backend will populate this from each experiment's recorded
+    // linear_doc_url; the seed mirrors the shape so the link wires through.
+    const slug = s.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase().replace(/^-|-$/g, "");
     return {
       name: s.name,
       state: s.state,
@@ -114,6 +118,7 @@ export function seedExperiments(): Experiment[] {
       run_count: s.versions,
       repo: s.name.split("/")[0],
       state_history: buildHistory(s.history, t - s.latestAgeSec * 1000, s.duration),
+      linear_doc_url: `https://linear.app/astrolabe-demo/document/exp-${slug}`,
     };
   });
 }
@@ -149,9 +154,15 @@ export function seedRuns(experiment: string): Run[] {
     const active = isLatest && !!spec.active;
     const creationMs = t - ageSec * 1000;
     const endMs = active ? null : creationMs + duration * 1000;
+    // Real Aim runs get human-or-engine-generated names that aren't just
+    // ordinals. Mirror that here so the UI can't conflate "run name" with
+    // "version number" — version is a derived ordinal, name is identity.
+    const hash = hashFor(experiment, i);
+    const adjective = ["bright", "calm", "swift", "stoic", "lucid", "warm"][i % 6];
+    const animal = ["otter", "vireo", "lynx", "marmot", "heron", "ibex"][(i * 3) % 6];
     out.push({
-      hash: hashFor(experiment, i),
-      name: `v${i}`,
+      hash,
+      name: `${adjective}-${animal}-${hash.slice(0, 4)}`,
       experiment,
       creation_time: new Date(creationMs).toISOString(),
       end_time: endMs ? new Date(endMs).toISOString() : null,
