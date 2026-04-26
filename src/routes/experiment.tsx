@@ -218,32 +218,8 @@ function ExperimentBody({
         name: c.name,
       };
     }
-
-  // Per-run metadata: active flag + creationMs (for wall-time x-axis).
-  const runMeta = useMemo(() => {
-    const map: Record<
-      string,
-      { active: boolean; creationMs: number; experiment: string; name: string }
-    > = {};
-    for (const r of runsState.data ?? []) {
-      map[r.hash] = {
-        active: r.active,
-        creationMs: new Date(r.creation_time).getTime(),
-        experiment: r.experiment,
-        name: r.name,
-      };
-    }
-    // Comparison runs default to inactive — we don't poll them.
-    for (const c of comparison) {
-      map[c.hash] ??= {
-        active: false,
-        creationMs: 0,
-        experiment: c.experiment,
-        name: c.name,
-      };
-    }
     return map;
-  }, [runsState.data, comparison]);
+  }, [selectedVersion, comparison]);
 
   // Sidebar: per-run visibility toggles
   const [hiddenRuns, setHiddenRuns] = useState<Set<string>>(new Set());
