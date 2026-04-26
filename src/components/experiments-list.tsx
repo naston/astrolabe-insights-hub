@@ -40,6 +40,9 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
     [],
     { intervalMs: POLL_MS },
   );
+  // Distinguish "first paint, no data yet" from "background re-fetch".
+  // We only show loading affordances during the first load.
+  const firstLoad = loading && data === undefined;
 
   const experiments = useMemo(() => data ?? [], [data]);
 
@@ -209,7 +212,9 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
             aria-label="Refresh"
             title="Refresh now (r)"
           >
-            <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
+            {/* Spinner only animates during the very first load — background
+                polls are silent per spec. */}
+            <RefreshCw className={cn("h-3.5 w-3.5", firstLoad && "animate-spin")} />
           </button>
           <button
             onClick={onShowHelp}
