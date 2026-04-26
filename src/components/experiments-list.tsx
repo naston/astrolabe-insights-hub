@@ -444,28 +444,31 @@ function ExperimentRow({
 
 function RunsPanel({ experimentName }: { experimentName: string }) {
   // Polling at the same cadence as the parent list keeps things consistent.
-  const { data, error, loading } = usePolling(
+  const { data, error } = usePolling(
     (signal) => api.runs(experimentName, signal),
     [experimentName],
     { intervalMs: POLL_MS },
   );
 
+  // We intentionally suppress the "loading…" word during background polls.
+  // The first paint shows a tiny skeleton hint instead, then content lands silently.
   return (
     <div className="border-t border-border bg-surface/50 px-3 py-2 animate-fade-in">
-      {loading && !data && (
-        <div className="px-2 py-3 text-xs text-muted-foreground">Loading runs…</div>
-      )}
-      {error && (
+      {error && !data && (
         <div className="px-2 py-3 text-xs text-destructive">
-          Failed to load runs — {error.message}
+          Failed to load versions — {error.message}
         </div>
       )}
       {data && data.length === 0 && (
-        <div className="px-2 py-3 text-xs text-muted-foreground">No runs yet.</div>
+        <div className="px-2 py-3 text-xs text-muted-foreground">No versions yet.</div>
+      )}
+      {!data && !error && (
+        <div className="px-2 py-3 text-xs text-muted-foreground/60 font-mono">·····</div>
       )}
       {data && data.length > 0 && (
         <div className="rounded-md border border-border bg-card overflow-hidden">
-          <div className="grid grid-cols-[80px_minmax(0,1fr)_120px_120px_100px_90px] gap-3 border-b border-border bg-surface px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+          <div className="grid grid-cols-[60px_80px_minmax(0,1fr)_120px_120px_100px_90px] gap-3 border-b border-border bg-surface px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+            <span>Version</span>
             <span>Hash</span>
             <span>Run</span>
             <span>Created</span>
@@ -474,9 +477,21 @@ function RunsPanel({ experimentName }: { experimentName: string }) {
             <span className="text-right">State</span>
           </div>
           <ul className="divide-y divide-border">
-            {data.map((run) => (
-              <RunRow key={run.hash} run={run} />
-            ))}
+            {/* Render newest-first so v1 of N reads the same as the version selector */}
+            {[...data]
+              .sort(
+                (a, b) =>
+                  new Date(b.creation_time).getTime() -
+                  new Date(a.creation_time).getTime(),
+              )
+              .map((run, i, all) => (
+                <RunRow
+                  key={run.hash}
+                  run={run}
+                  experimentName={experimentName}
+                  versionLabel={`v${all.length - i}`}
+                />
+              ))}
           </ul>
         </div>
       )}
@@ -484,9 +499,38 @@ function RunsPanel({ experimentName }: { experimentName: string }) {
   );
 }
 
-function RunRow({ run }: { run: Run }) {
+function VersionBadge({ count }: { count: number }) {
+  // Cardinality cue — make it obvious that one row = N submits.
   return (
-    <li className="grid grid-cols-[80px_minmax(0,1fr)_120px_120px_100px_90px] gap-3 items-center px-3 py-1.5 text-xs hover:bg-muted/50">
+    <span
+      className="inline-flex items-center gap-1 rounded-md border border-border bg-surface px-1.5 py-0.5 text-[10px] font-mono text-muted-foreground"
+      title={`${count} submitted version${count === 1 ? "" : "s"}`}
+    >
+      <span className="text-tabular text-foreground font-medium">×{count}</span>
+      <span className="opacity-60">v</span>
+    </span>
+  );
+}
+
+function RunRow({
+  run,
+  experimentName,
+  versionLabel,
+}: {
+  run: Run;
+  experimentName: string;
+  versionLabel: string;
+}) {
+  return (
+    <li className="grid grid-cols-[60px_80px_minmax(0,1fr)_120px_120px_100px_90px] gap-3 items-center px-3 py-1.5 text-xs hover:bg-muted/50">
+      <Link
+        to="/experiment"
+        search={{ name: experimentName, version: versionLabel }}
+        className="font-mono text-tabular text-foreground hover:text-primary"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {versionLabel}
+      </Link>
       <span className="font-mono text-muted-foreground">{shortHash(run.hash)}</span>
       <span className="truncate font-medium">{run.name}</span>
       <span
