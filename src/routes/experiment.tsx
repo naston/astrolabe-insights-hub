@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 
 import { api, DEFAULT_PALETTE } from "@/lib/api";
-import type { Experiment, Run } from "@/lib/types";
+import type { Experiment, MetricSeries, Run } from "@/lib/types";
 import { usePolling } from "@/hooks/use-polling";
 import {
   formatDuration,
@@ -652,11 +652,14 @@ function ExperimentBody({
               </div>
             )}
 
-            {/* Per-run stats — one row per run of the selected version. */}
+            {/* Per-run stats — one row per run of the selected version, with
+                a metric + best/last selector so the headline column is
+                explicit (and "winner" gets a tinted row when best). */}
             <RunStatsTable
               versionLabel={selectedVersion?.label}
               runs={selectedVersion?.runs ?? []}
               runColors={runColors}
+              availableMetrics={metricNames}
             />
           </aside>
         </div>
@@ -701,6 +704,20 @@ function SegButton({
   );
 }
 
+type StatsMeasurement = "best" | "last";
+
+/** Heuristic — does "best" mean min or max for this metric name? */
+function metricDirection(name: string): "min" | "max" {
+  // Loss-shaped metrics where lower is better.
+  if (/loss|error|perplexity|\bppl\b|nll/i.test(name)) return "min";
+  // Score-shaped metrics where higher is better.
+  if (/accuracy|f1|auc|precision|recall|score|\bbleu\b|\brouge\b/i.test(name))
+    return "max";
+  // Default to min for anything unclassified — most ML metrics that you'd
+  // want to "find the best of" are loss-shaped.
+  return "min";
+}
+
 /**
  * Per-run stats table for the sidebar. One row per run of the SELECTED
  * version — the runs being compared in the charts above. For an
@@ -708,32 +725,147 @@ function SegButton({
  * (BERT, LatentBERT) with their respective metrics; switching the version
  * selector swaps which version's runs populate the table.
  *
- * Aggregate stats (best across runs, median, etc.) belong in a *table* the
- * researcher can read row-by-row, not in a four-cell `dl` that hides which
- * run the "best loss" came from. The table fills the same role with much
- * more signal per pixel.
+ * The table's headline column is configurable: the user picks which metric
+ * to show, and whether to display the **best** value (min or max depending
+ * on the metric — losses minimize, scores maximize) or the **last** logged
+ * value. Both are useful for different questions: "which run won?" wants
+ * best, "what was the run's final state?" wants last.
  */
 function RunStatsTable({
   versionLabel,
   runs,
   runColors,
+  availableMetrics,
 }: {
   versionLabel: string | undefined;
   runs: Run[];
   runColors: Record<string, string>;
+  availableMetrics: string[];
 }) {
+  // Default to train/loss when present, otherwise the first available metric.
+  const defaultMetric = useMemo(() => {
+    if (availableMetrics.includes("train/loss")) return "train/loss";
+    return availableMetrics[0] ?? "train/loss";
+  }, [availableMetrics]);
+  const [metric, setMetric] = useState<string>(defaultMetric);
+  const [measurement, setMeasurement] = useState<StatsMeasurement>("best");
+
+  // Re-default when the available list changes (e.g. switching experiments).
+  useEffect(() => {
+    if (!availableMetrics.includes(metric)) {
+      setMetric(defaultMetric);
+    }
+  }, [availableMetrics, defaultMetric, metric]);
+
+  // Fetch the chosen metric for each run. Refreshes every 5s so active runs
+  // see updated values without burning the chart-poll cadence (2s) on the
+  // sidebar.
+  const [series, setSeries] = useState<Record<string, MetricSeries | null>>({});
+  const runHashes = useMemo(() => runs.map((r) => r.hash).join(","), [runs]);
+  useEffect(() => {
+    let cancelled = false;
+    const ctrl = new AbortController();
+
+    async function fetchAll() {
+      const entries = await Promise.all(
+        runs.map(async (r): Promise<[string, MetricSeries | null]> => {
+          try {
+            const s = await api.metric(r.hash, metric, ctrl.signal);
+            return [r.hash, s];
+          } catch {
+            return [r.hash, null];
+          }
+        }),
+      );
+      if (!cancelled) {
+        setSeries(Object.fromEntries(entries));
+      }
+    }
+    fetchAll();
+    const id = window.setInterval(fetchAll, 5000);
+    return () => {
+      cancelled = true;
+      ctrl.abort();
+      window.clearInterval(id);
+    };
+  }, [runHashes, metric, runs]);
+
+  const direction = metricDirection(metric);
+  const computed = useMemo(() => {
+    const out: Record<string, number | null> = {};
+    for (const r of runs) {
+      const s = series[r.hash];
+      if (!s || s.values.length === 0) {
+        out[r.hash] = null;
+        continue;
+      }
+      if (measurement === "last") {
+        out[r.hash] = s.values[s.values.length - 1];
+      } else {
+        out[r.hash] =
+          direction === "min" ? Math.min(...s.values) : Math.max(...s.values);
+      }
+    }
+    return out;
+  }, [series, runs, measurement, direction]);
+
   if (runs.length === 0) return null;
+
   return (
     <div className="rounded-lg border border-border bg-card overflow-hidden">
-      <div className="px-3 py-2 border-b border-border flex items-center justify-between">
-        <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-          Run stats
-        </span>
-        {versionLabel && (
-          <span className="text-[10px] font-mono text-muted-foreground">
-            {versionLabel}
+      <div className="px-3 py-2 border-b border-border space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+            Run stats
           </span>
-        )}
+          {versionLabel && (
+            <span className="text-[10px] font-mono text-muted-foreground">
+              {versionLabel}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1">
+          <select
+            value={metric}
+            onChange={(e) => setMetric(e.target.value)}
+            className="flex-1 min-w-0 rounded-md border border-border bg-surface px-2 py-1 text-[11px] font-mono focus:outline-none focus:ring-1 focus:ring-ring"
+            title="Metric shown in the value column"
+          >
+            {availableMetrics.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+          <div className="flex rounded-md border border-border bg-surface p-0.5 text-[11px]">
+            <button
+              type="button"
+              onClick={() => setMeasurement("best")}
+              className={cn(
+                "px-2 py-0.5 rounded transition-colors",
+                measurement === "best"
+                  ? "bg-card text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+              title={`Best value across the run (${direction === "min" ? "minimum" : "maximum"} of ${metric})`}
+            >
+              best
+            </button>
+            <button
+              type="button"
+              onClick={() => setMeasurement("last")}
+              className={cn(
+                "px-2 py-0.5 rounded transition-colors",
+                measurement === "last"
+                  ? "bg-card text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+              title={`Last logged value of ${metric}`}
+            >
+              last
+            </button>
+          </div>
+        </div>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full text-[11px] font-mono">
@@ -741,7 +873,12 @@ function RunStatsTable({
             <tr>
               <th className="text-left px-2 py-1.5 font-medium">run</th>
               <th className="text-left px-2 py-1.5 font-medium">hash</th>
-              <th className="text-right px-2 py-1.5 font-medium">final</th>
+              <th className="text-right px-2 py-1.5 font-medium" title={`${metric} · ${measurement}`}>
+                <span className="truncate inline-block max-w-[80px] align-middle">
+                  {metric}
+                </span>
+                <span className="opacity-60"> · {measurement}</span>
+              </th>
               <th className="text-right px-2 py-1.5 font-medium">dur</th>
               <th className="text-right px-2 py-1.5 font-medium">state</th>
             </tr>
@@ -749,8 +886,26 @@ function RunStatsTable({
           <tbody className="divide-y divide-border">
             {runs.map((r) => {
               const stateLabel = r.active ? "live" : r.end_time ? "done" : "—";
+              const value = computed[r.hash];
+              // Highlight the row that holds the best value across all runs
+              // — quick "which one won?" cue when measurement = best.
+              const isWinner =
+                measurement === "best" &&
+                value != null &&
+                Object.values(computed)
+                  .filter((v): v is number => v != null)
+                  .every((other) =>
+                    direction === "min" ? value <= other : value >= other,
+                  );
               return (
-                <tr key={r.hash} className="hover:bg-muted/50">
+                <tr
+                  key={r.hash}
+                  className={cn(
+                    "hover:bg-muted/50",
+                    isWinner &&
+                      "bg-[color-mix(in_oklab,var(--success)_8%,transparent)]",
+                  )}
+                >
                   <td className="px-2 py-1.5 align-middle">
                     <div className="flex items-center gap-1.5">
                       <span
@@ -763,8 +918,13 @@ function RunStatsTable({
                   <td className="px-2 py-1.5 align-middle text-muted-foreground">
                     {shortHash(r.hash)}
                   </td>
-                  <td className="px-2 py-1.5 align-middle text-right text-tabular">
-                    {r.final_loss != null ? r.final_loss.toFixed(4) : "—"}
+                  <td
+                    className={cn(
+                      "px-2 py-1.5 align-middle text-right text-tabular",
+                      isWinner && "text-[var(--success)] font-medium",
+                    )}
+                  >
+                    {value != null ? value.toFixed(4) : "—"}
                   </td>
                   <td className="px-2 py-1.5 align-middle text-right text-tabular text-muted-foreground">
                     {formatDuration(r.duration ?? 0)}
