@@ -327,6 +327,41 @@ function ExperimentBody({
                   live
                 </span>
               )}
+              <VersionSelector
+                versions={versions}
+                selectedLabel={selectedVersion?.label}
+                pinnedLatest={isLatestPin}
+                onSelect={(label) => {
+                  navigate({
+                    to: "/experiment",
+                    search: { name: experimentName, version: label },
+                  });
+                }}
+              />
+              {!isLatestPin && !isOnLatest && versions.length > 0 && (
+                <button
+                  onClick={() =>
+                    navigate({
+                      to: "/experiment",
+                      search: { name: experimentName, version: "latest" },
+                    })
+                  }
+                  className="inline-flex items-center gap-1 rounded-md border border-warning/40 bg-[color-mix(in_oklab,var(--warning)_12%,transparent)] px-1.5 py-0.5 text-[10px] font-mono text-[var(--warning)] hover:bg-[color-mix(in_oklab,var(--warning)_20%,transparent)]"
+                  title="Pin to the most recent submit"
+                >
+                  ← jump to latest
+                </button>
+              )}
+              <a
+                href={linearDocUrl(experimentName)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:border-border-strong"
+                title="Open the experiment writeup in Linear"
+              >
+                Linear doc
+                <ExternalLink className="h-3 w-3" />
+              </a>
             </div>
             <div className="mt-1.5 flex items-center gap-4 text-xs text-muted-foreground font-mono">
               <span className="text-tabular">elapsed {formatDuration(elapsed)}</span>
@@ -337,7 +372,9 @@ function ExperimentBody({
               <span className="opacity-50">·</span>
               <span>gpu {experiment?.gpu_type ?? "—"}</span>
               <span className="opacity-50">·</span>
-              <span>{allRuns.length} runs</span>
+              <span>
+                {selectedVersion?.label ?? "—"} of {versions.length || "—"}
+              </span>
               {comparison.length > 0 && (
                 <>
                   <span className="opacity-50">·</span>
