@@ -241,9 +241,9 @@ export function MetricChart({
               />
               <Tooltip
                 cursor={{ stroke: "var(--border-strong)", strokeWidth: 1 }}
-                content={(props) => (
+                content={(props: unknown) => (
                   <ChartTooltip
-                    {...props}
+                    {...(props as TooltipProps)}
                     runs={visibleRuns}
                     xMode={xMode}
                   />
