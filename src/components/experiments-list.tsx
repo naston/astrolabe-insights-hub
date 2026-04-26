@@ -133,7 +133,7 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
           e.preventDefault();
           navigate({
             to: "/experiment",
-            search: { name: exp.name },
+            search: { name: exp.name, version: "latest" },
           });
         }
       } else if (e.key === "x" || e.key === "o") {
