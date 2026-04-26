@@ -26,7 +26,16 @@ interface SeedSpec {
   state: ExperimentState;
   outcome: Experiment["outcome"];
   gpu: string;
+  /** Number of versions of this experiment (each = a re-submit with tweaks). */
   versions: number;
+  /**
+   * Run names per version — e.g. an "architecture-comparison" experiment
+   * declares ["BERT", "LatentBERT"], producing 2 runs per version. The
+   * SAME run names appear across versions; that's how the user pivots from
+   * "v1.BERT vs v1.LatentBERT" to "v2.BERT vs v2.LatentBERT" by switching
+   * versions.
+   */
+  runNames: string[];
   /** Seconds ago for the LATEST version's creation_time. */
   latestAgeSec: number;
   /** Latest version's duration in seconds. */
@@ -39,11 +48,12 @@ interface SeedSpec {
 
 const SPECS: SeedSpec[] = [
   {
-    name: "thesis-vit/scale-laws-256",
+    name: "thesis-vit/arch-comparison",
     state: "RUNNING",
     outcome: null,
     gpu: "8× H100",
-    versions: 5,
+    versions: 3,
+    runNames: ["BERT", "LatentBERT"],
     latestAgeSec: 42 * 60,
     duration: 42 * 60,
     active: true,
@@ -54,17 +64,19 @@ const SPECS: SeedSpec[] = [
     state: "COMPLETED",
     outcome: "success",
     gpu: "4× A100",
-    versions: 3,
+    versions: 2,
+    runNames: ["small", "medium", "large"],
     latestAgeSec: 8 * HOUR,
     duration: 4 * HOUR + 12 * 60,
     history: ["PENDING", "ACQUIRING", "SETUP", "RUNNING", "SUMMARIZING", "COMPLETED"],
   },
   {
-    name: "rlhf/preference-mix-v4",
+    name: "rlhf/preference-mix",
     state: "HEALING",
     outcome: null,
     gpu: "8× H100",
     versions: 2,
+    runNames: ["dpo", "ipo", "ppo"],
     latestAgeSec: 11 * 60,
     duration: 11 * 60,
     active: true,
@@ -76,6 +88,7 @@ const SPECS: SeedSpec[] = [
     outcome: "failure",
     gpu: "2× A100",
     versions: 4,
+    runNames: ["llama-7b", "llama-13b"],
     latestAgeSec: 2 * DAY + 3 * HOUR,
     duration: 38 * 60,
     history: ["PENDING", "ACQUIRING", "SETUP", "RUNNING", "FAILED"],
@@ -86,6 +99,7 @@ const SPECS: SeedSpec[] = [
     outcome: "success",
     gpu: "1× H100",
     versions: 2,
+    runNames: ["fp16", "bf16", "fp8"],
     latestAgeSec: 6 * DAY,
     duration: 22 * 60,
     history: ["PENDING", "ACQUIRING", "RUNNING", "SUMMARIZING", "COMPLETED"],
@@ -115,7 +129,12 @@ export function seedExperiments(): Experiment[] {
       started_at: startedAt,
       duration: s.duration,
       outcome: s.outcome,
-      run_count: s.versions,
+      // Total run count across every version. The latest version's run
+      // count is what the home page expansion shows by default; this
+      // top-line number reflects how many training executions have run
+      // under this experiment in total (versions × runs-per-version).
+      run_count: s.versions * s.runNames.length,
+      version_count: s.versions,
       repo: s.name.split("/")[0],
       state_history: buildHistory(s.history, t - s.latestAgeSec * 1000, s.duration),
       linear_doc_url: `https://linear.app/astrolabe-demo/document/exp-${slug}`,
@@ -123,10 +142,10 @@ export function seedExperiments(): Experiment[] {
   });
 }
 
-/** Deterministic hash so the same (experiment, version) gets the same id. */
-function hashFor(name: string, version: number): string {
+/** Deterministic hash so the same (experiment, version, run-name) gets the same id. */
+function hashFor(experiment: string, version: number, runName: string): string {
   let h = 0x811c9dc5;
-  const seed = `${name}#v${version}`;
+  const seed = `${experiment}#v${version}#${runName}`;
   for (let i = 0; i < seed.length; i++) {
     h ^= seed.charCodeAt(i);
     h = (h * 0x01000193) >>> 0;
@@ -138,45 +157,57 @@ export function seedRuns(experiment: string): Run[] {
   const spec = SPECS.find((s) => s.name === experiment);
   if (!spec) return [];
   const t = now();
-  // Versions are spaced at increasing intervals (oldest first). The latest one
-  // matches the experiment's started_at / duration / active flag.
+  // Cardinality: each experiment has spec.versions versions, and each version
+  // contains spec.runNames.length runs (one per declared training job — e.g.
+  // "BERT" + "LatentBERT" for an arch-comparison experiment). Older versions
+  // are spaced back in time; the latest version uses the spec's latestAgeSec
+  // / duration / active flag.
   const out: Run[] = [];
-  for (let i = 1; i <= spec.versions; i++) {
-    const isLatest = i === spec.versions;
-    // Older versions: spaced ~1-3 days back from latest
-    const ageDays = (spec.versions - i) * (1.5 + (i % 2));
-    const ageSec = isLatest
+  for (let v = 1; v <= spec.versions; v++) {
+    const isLatestVersion = v === spec.versions;
+    // Older versions sit ~1-3 days behind the next version's creation time.
+    const ageDays = (spec.versions - v) * (1.5 + (v % 2));
+    const versionAgeSec = isLatestVersion
       ? spec.latestAgeSec
       : spec.latestAgeSec + ageDays * DAY;
-    const duration = isLatest
+    const versionDuration = isLatestVersion
       ? spec.duration
-      : Math.round(spec.duration * (0.6 + ((i * 37) % 80) / 100));
-    const active = isLatest && !!spec.active;
-    const creationMs = t - ageSec * 1000;
-    const endMs = active ? null : creationMs + duration * 1000;
-    // Real Aim runs get human-or-engine-generated names that aren't just
-    // ordinals. Mirror that here so the UI can't conflate "run name" with
-    // "version number" — version is a derived ordinal, name is identity.
-    const hash = hashFor(experiment, i);
-    const adjective = ["bright", "calm", "swift", "stoic", "lucid", "warm"][i % 6];
-    const animal = ["otter", "vireo", "lynx", "marmot", "heron", "ibex"][(i * 3) % 6];
-    out.push({
-      hash,
-      name: `${adjective}-${animal}-${hash.slice(0, 4)}`,
-      experiment,
-      creation_time: new Date(creationMs).toISOString(),
-      end_time: endMs ? new Date(endMs).toISOString() : null,
-      active,
-      duration,
-      metrics: [
-        { name: "train/loss", context: null },
-        { name: "eval/loss", context: null },
-        { name: "eval/accuracy", context: null },
-        { name: "lr", context: null },
-        { name: "grad_norm", context: null },
-      ],
-      final_loss: active ? null : 0.4 + ((i * 17) % 100) / 250,
-    });
+      : Math.round(spec.duration * (0.6 + ((v * 37) % 80) / 100));
+    const versionActive = isLatestVersion && !!spec.active;
+    // All runs in one version start at the same wall-clock time (same submit).
+    const versionStartMs = t - versionAgeSec * 1000;
+    for (let r = 0; r < spec.runNames.length; r++) {
+      const runName = spec.runNames[r];
+      const hash = hashFor(experiment, v, runName);
+      // Per-run jitter so the runs in a version don't have identical durations.
+      const runDuration = Math.max(
+        30,
+        Math.round(versionDuration * (0.85 + ((r * 23) % 30) / 100)),
+      );
+      const endMs = versionActive ? null : versionStartMs + runDuration * 1000;
+      out.push({
+        hash,
+        name: runName,
+        experiment,
+        version: `v${v}`,
+        creation_time: new Date(versionStartMs).toISOString(),
+        end_time: endMs ? new Date(endMs).toISOString() : null,
+        active: versionActive,
+        duration: runDuration,
+        metrics: [
+          { name: "train/loss", context: null },
+          { name: "eval/loss", context: null },
+          { name: "eval/accuracy", context: null },
+          { name: "lr", context: null },
+          { name: "grad_norm", context: null },
+        ],
+        // Different runs in the same version land at slightly different final
+        // losses — that's the point of comparing them.
+        final_loss: versionActive
+          ? null
+          : 0.4 + ((v * 13 + r * 29) % 100) / 250,
+      });
+    }
   }
   return out;
 }
