@@ -1,7 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { z } from "zod";
-import { ArrowLeft, Filter as FilterIcon, Plus, Search } from "lucide-react";
+import {
+  ArrowLeft,
+  ChevronDown,
+  ExternalLink,
+  Filter as FilterIcon,
+  Plus,
+  Search,
+} from "lucide-react";
 
 import { api, DEFAULT_PALETTE } from "@/lib/api";
 import type { Experiment, Run } from "@/lib/types";
@@ -31,6 +38,8 @@ import { useGlobalShortcuts } from "@/hooks/use-global-shortcuts";
 
 const searchSchema = z.object({
   name: z.string().catch("").default(""),
+  // `version` is "latest" or "vN" (1-indexed, oldest = v1).
+  version: z.string().catch("latest").default("latest"),
 });
 
 export const Route = createFileRoute("/experiment")({
@@ -60,7 +69,7 @@ const PRIMARY_METRIC = "train/loss";
 const SECONDARY_METRICS = ["eval/loss", "eval/accuracy"];
 
 function ExperimentPage() {
-  const { name } = Route.useSearch();
+  const { name, version } = Route.useSearch();
   const [helpOpen, setHelpOpen] = useState(false);
   useGlobalShortcuts({ onHelpToggle: () => setHelpOpen((o) => !o) });
 
@@ -85,19 +94,33 @@ function ExperimentPage() {
 
   return (
     <ChartZoomProvider>
-      <ExperimentBody experimentName={name} onShowHelp={() => setHelpOpen(true)} />
+      <ExperimentBody
+        experimentName={name}
+        versionParam={version || "latest"}
+        onShowHelp={() => setHelpOpen(true)}
+      />
       <ShortcutsHelp open={helpOpen} onOpenChange={setHelpOpen} />
     </ChartZoomProvider>
   );
 }
 
+interface VersionInfo {
+  /** "v1", "v2", … (1-indexed, oldest first). */
+  label: string;
+  run: Run;
+}
+
 function ExperimentBody({
   experimentName,
+  versionParam,
   onShowHelp,
 }: {
   experimentName: string;
+  versionParam: string;
   onShowHelp: () => void;
 }) {
+  const navigate = useNavigate();
+
   // Experiments list (so we can find this experiment's metadata)
   const expState = usePolling(
     (signal) => api.experiments(signal),
@@ -109,12 +132,33 @@ function ExperimentBody({
     [expState.data, experimentName],
   );
 
-  // Runs for this experiment
+  // Runs for this experiment — each run is one submitted "version".
   const runsState = usePolling(
     (signal) => api.runs(experimentName, signal),
     [experimentName],
     { intervalMs: RUNS_POLL_MS },
   );
+
+  // Build the canonical version list (oldest = v1) ordered by creation_time.
+  const versions: VersionInfo[] = useMemo(() => {
+    const sorted = [...(runsState.data ?? [])].sort(
+      (a, b) =>
+        new Date(a.creation_time).getTime() - new Date(b.creation_time).getTime(),
+    );
+    return sorted.map((run, i) => ({ label: `v${i + 1}`, run }));
+  }, [runsState.data]);
+
+  // Resolve the selected version. "latest" tracks the most recent submit.
+  const isLatestPin = versionParam === "latest";
+  const selectedVersion: VersionInfo | undefined = useMemo(() => {
+    if (versions.length === 0) return undefined;
+    if (isLatestPin) return versions[versions.length - 1];
+    const match = versions.find((v) => v.label === versionParam);
+    return match ?? versions[versions.length - 1];
+  }, [versions, versionParam, isLatestPin]);
+
+  const isOnLatest =
+    selectedVersion && selectedVersion === versions[versions.length - 1];
 
   // Color palette from API (with fallback)
   const [palette, setPalette] = useState<string[]>(DEFAULT_PALETTE);
@@ -135,16 +179,20 @@ function ExperimentBody({
   const [comparison, setComparison] = useState<ComparisonRunPick[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
 
-  // Combine native + comparison runs into one ordered list.
+  // The "primary" run shown in charts is just the selected version.
+  // Comparison overlays are appended; switching versions does NOT clear them.
   const allRuns = useMemo(() => {
-    const native: ComparisonRunPick[] =
-      runsState.data?.map((r) => ({
-        hash: r.hash,
-        name: r.name,
-        experiment: r.experiment,
-      })) ?? [];
+    const native: ComparisonRunPick[] = selectedVersion
+      ? [
+          {
+            hash: selectedVersion.run.hash,
+            name: selectedVersion.label,
+            experiment: selectedVersion.run.experiment,
+          },
+        ]
+      : [];
     return [...native, ...comparison.filter((c) => !native.find((n) => n.hash === c.hash))];
-  }, [runsState.data, comparison]);
+  }, [selectedVersion, comparison]);
 
   // Per-run metadata: active flag + creationMs (for wall-time x-axis).
   const runMeta = useMemo(() => {
@@ -152,12 +200,13 @@ function ExperimentBody({
       string,
       { active: boolean; creationMs: number; experiment: string; name: string }
     > = {};
-    for (const r of runsState.data ?? []) {
+    if (selectedVersion) {
+      const r = selectedVersion.run;
       map[r.hash] = {
         active: r.active,
         creationMs: new Date(r.creation_time).getTime(),
         experiment: r.experiment,
-        name: r.name,
+        name: selectedVersion.label,
       };
     }
     // Comparison runs default to inactive — we don't poll them.
@@ -170,7 +219,7 @@ function ExperimentBody({
       };
     }
     return map;
-  }, [runsState.data, comparison]);
+  }, [selectedVersion, comparison]);
 
   // Sidebar: per-run visibility toggles
   const [hiddenRuns, setHiddenRuns] = useState<Set<string>>(new Set());
@@ -278,6 +327,41 @@ function ExperimentBody({
                   live
                 </span>
               )}
+              <VersionSelector
+                versions={versions}
+                selectedLabel={selectedVersion?.label}
+                pinnedLatest={isLatestPin}
+                onSelect={(label) => {
+                  navigate({
+                    to: "/experiment",
+                    search: { name: experimentName, version: label },
+                  });
+                }}
+              />
+              {!isLatestPin && !isOnLatest && versions.length > 0 && (
+                <button
+                  onClick={() =>
+                    navigate({
+                      to: "/experiment",
+                      search: { name: experimentName, version: "latest" },
+                    })
+                  }
+                  className="inline-flex items-center gap-1 rounded-md border border-warning/40 bg-[color-mix(in_oklab,var(--warning)_12%,transparent)] px-1.5 py-0.5 text-[10px] font-mono text-[var(--warning)] hover:bg-[color-mix(in_oklab,var(--warning)_20%,transparent)]"
+                  title="Pin to the most recent submit"
+                >
+                  ← jump to latest
+                </button>
+              )}
+              <a
+                href={linearDocUrl(experimentName)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:border-border-strong"
+                title="Open the experiment writeup in Linear"
+              >
+                Linear doc
+                <ExternalLink className="h-3 w-3" />
+              </a>
             </div>
             <div className="mt-1.5 flex items-center gap-4 text-xs text-muted-foreground font-mono">
               <span className="text-tabular">elapsed {formatDuration(elapsed)}</span>
@@ -288,7 +372,9 @@ function ExperimentBody({
               <span className="opacity-50">·</span>
               <span>gpu {experiment?.gpu_type ?? "—"}</span>
               <span className="opacity-50">·</span>
-              <span>{allRuns.length} runs</span>
+              <span>
+                {selectedVersion?.label ?? "—"} of {versions.length || "—"}
+              </span>
               {comparison.length > 0 && (
                 <>
                   <span className="opacity-50">·</span>
@@ -603,6 +689,140 @@ function RunStatsTable({ runs }: { runs: Run[] }) {
           {runs.filter((r) => r.active).length}
         </dd>
       </dl>
+    </div>
+  );
+}
+
+/**
+ * Build a Linear search URL for the experiment writeup. The Astrolabe
+ * convention is one Linear issue per experiment with the experiment name in
+ * the title; opening Linear's search with the name lands on the right doc
+ * even when the URL slug doesn't match exactly.
+ */
+function linearDocUrl(experimentName: string): string {
+  const q = encodeURIComponent(experimentName);
+  return `https://linear.app/search?q=${q}`;
+}
+
+interface VersionSelectorProps {
+  versions: VersionInfo[];
+  selectedLabel: string | undefined;
+  pinnedLatest: boolean;
+  onSelect: (label: string) => void;
+}
+
+function VersionSelector({
+  versions,
+  selectedLabel,
+  pinnedLatest,
+  onSelect,
+}: VersionSelectorProps) {
+  const [open, setOpen] = useState(false);
+
+  // Close on outside click / Escape
+  useEffect(() => {
+    if (!open) return;
+    const onClick = () => setOpen(false);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("click", onClick);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", onClick);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  if (versions.length === 0) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-md border border-border bg-surface px-2 py-1 text-[11px] font-mono text-muted-foreground">
+        no versions
+      </span>
+    );
+  }
+
+  // Newest first in the dropdown
+  const ordered = [...versions].reverse();
+  const latest = versions[versions.length - 1];
+
+  return (
+    <div className="relative" onClick={(e) => e.stopPropagation()}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className={cn(
+          "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-mono",
+          pinnedLatest
+            ? "border-border bg-surface text-muted-foreground hover:text-foreground"
+            : "border-primary/40 bg-[color-mix(in_oklab,var(--primary)_12%,transparent)] text-foreground",
+        )}
+        title="Switch version"
+      >
+        <span className="text-tabular text-foreground font-medium">
+          {selectedLabel ?? "—"}
+        </span>
+        <span className="opacity-60">of {versions.length}</span>
+        {pinnedLatest && (
+          <span className="rounded bg-muted px-1 py-px text-[9px] uppercase tracking-wider text-muted-foreground">
+            latest
+          </span>
+        )}
+        <ChevronDown className="h-3 w-3 opacity-60" />
+      </button>
+      {open && (
+        <div
+          className="absolute left-0 top-full z-40 mt-1 w-64 rounded-md border border-border bg-popover shadow-xl overflow-hidden"
+          role="menu"
+        >
+          <button
+            onClick={() => {
+              onSelect("latest");
+              setOpen(false);
+            }}
+            className={cn(
+              "w-full text-left px-3 py-2 text-xs font-mono hover:bg-muted flex items-center justify-between border-b border-border",
+              pinnedLatest && "bg-[color-mix(in_oklab,var(--primary)_10%,transparent)]",
+            )}
+            role="menuitem"
+          >
+            <span className="flex items-center gap-2">
+              <span className="text-foreground font-medium">latest</span>
+              <span className="text-muted-foreground">→ {latest.label}</span>
+            </span>
+            <span className="text-[10px] text-muted-foreground">
+              tracks newest
+            </span>
+          </button>
+          <ul className="max-h-[280px] overflow-y-auto scrollbar-thin">
+            {ordered.map((v) => {
+              const isSelected = v.label === selectedLabel && !pinnedLatest;
+              return (
+                <li key={v.label}>
+                  <button
+                    onClick={() => {
+                      onSelect(v.label);
+                      setOpen(false);
+                    }}
+                    className={cn(
+                      "w-full text-left px-3 py-1.5 text-xs font-mono hover:bg-muted flex items-center justify-between",
+                      isSelected && "bg-[color-mix(in_oklab,var(--primary)_10%,transparent)]",
+                    )}
+                    role="menuitem"
+                  >
+                    <span className="text-foreground">{v.label}</span>
+                    <span
+                      className="text-[10px] text-muted-foreground text-tabular"
+                      title={formatTimestamp(v.run.creation_time)}
+                    >
+                      {formatRelative(v.run.creation_time)}
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
