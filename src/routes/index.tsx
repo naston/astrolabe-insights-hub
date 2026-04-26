@@ -1,26 +1,38 @@
+import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 
+import { AppShell } from "@/components/app-shell";
+import { ExperimentsList } from "@/components/experiments-list";
+import { ShortcutsHelp } from "@/components/shortcuts-help";
+import { useGlobalShortcuts } from "@/hooks/use-global-shortcuts";
+
 export const Route = createFileRoute("/")({
+  head: () => ({
+    meta: [
+      { title: "Astrolabe — Experiments" },
+      {
+        name: "description",
+        content:
+          "Live overview of every ML experiment running on this Astrolabe cluster.",
+      },
+      { property: "og:title", content: "Astrolabe — Experiments" },
+      {
+        property: "og:description",
+        content: "Live overview of every ML experiment running on this cluster.",
+      },
+    ],
+  }),
   component: Index,
 });
 
-// IMPORTANT: Replace this placeholder. For sites with multiple pages (About, Services, Contact, etc.),
-// create separate route files (about.tsx, services.tsx, contact.tsx) — don't put all pages in this file.
-function PlaceholderIndex() {
-  return (
-    <div
-      className="flex min-h-screen items-center justify-center"
-      style={{ backgroundColor: "#fcfbf8" }}
-    >
-      <img
-        data-lovable-blank-page-placeholder="REMOVE_THIS"
-        src="https://cdn.gpteng.co/blank-app-v1.svg"
-        alt="Your app will live here!"
-      />
-    </div>
-  );
-}
-
 function Index() {
-  return <PlaceholderIndex />;
+  const [helpOpen, setHelpOpen] = useState(false);
+  useGlobalShortcuts({ onHelpToggle: () => setHelpOpen((o) => !o) });
+
+  return (
+    <AppShell>
+      <ExperimentsList onShowHelp={() => setHelpOpen(true)} />
+      <ShortcutsHelp open={helpOpen} onOpenChange={setHelpOpen} />
+    </AppShell>
+  );
 }
