@@ -69,7 +69,7 @@ const PRIMARY_METRIC = "train/loss";
 const SECONDARY_METRICS = ["eval/loss", "eval/accuracy"];
 
 function ExperimentPage() {
-  const { name } = Route.useSearch();
+  const { name, version } = Route.useSearch();
   const [helpOpen, setHelpOpen] = useState(false);
   useGlobalShortcuts({ onHelpToggle: () => setHelpOpen((o) => !o) });
 
@@ -94,19 +94,33 @@ function ExperimentPage() {
 
   return (
     <ChartZoomProvider>
-      <ExperimentBody experimentName={name} onShowHelp={() => setHelpOpen(true)} />
+      <ExperimentBody
+        experimentName={name}
+        versionParam={version || "latest"}
+        onShowHelp={() => setHelpOpen(true)}
+      />
       <ShortcutsHelp open={helpOpen} onOpenChange={setHelpOpen} />
     </ChartZoomProvider>
   );
 }
 
+interface VersionInfo {
+  /** "v1", "v2", … (1-indexed, oldest first). */
+  label: string;
+  run: Run;
+}
+
 function ExperimentBody({
   experimentName,
+  versionParam,
   onShowHelp,
 }: {
   experimentName: string;
+  versionParam: string;
   onShowHelp: () => void;
 }) {
+  const navigate = useNavigate();
+
   // Experiments list (so we can find this experiment's metadata)
   const expState = usePolling(
     (signal) => api.experiments(signal),
@@ -118,12 +132,33 @@ function ExperimentBody({
     [expState.data, experimentName],
   );
 
-  // Runs for this experiment
+  // Runs for this experiment — each run is one submitted "version".
   const runsState = usePolling(
     (signal) => api.runs(experimentName, signal),
     [experimentName],
     { intervalMs: RUNS_POLL_MS },
   );
+
+  // Build the canonical version list (oldest = v1) ordered by creation_time.
+  const versions: VersionInfo[] = useMemo(() => {
+    const sorted = [...(runsState.data ?? [])].sort(
+      (a, b) =>
+        new Date(a.creation_time).getTime() - new Date(b.creation_time).getTime(),
+    );
+    return sorted.map((run, i) => ({ label: `v${i + 1}`, run }));
+  }, [runsState.data]);
+
+  // Resolve the selected version. "latest" tracks the most recent submit.
+  const isLatestPin = versionParam === "latest";
+  const selectedVersion: VersionInfo | undefined = useMemo(() => {
+    if (versions.length === 0) return undefined;
+    if (isLatestPin) return versions[versions.length - 1];
+    const match = versions.find((v) => v.label === versionParam);
+    return match ?? versions[versions.length - 1];
+  }, [versions, versionParam, isLatestPin]);
+
+  const isOnLatest =
+    selectedVersion && selectedVersion === versions[versions.length - 1];
 
   // Color palette from API (with fallback)
   const [palette, setPalette] = useState<string[]>(DEFAULT_PALETTE);
@@ -144,16 +179,45 @@ function ExperimentBody({
   const [comparison, setComparison] = useState<ComparisonRunPick[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
 
-  // Combine native + comparison runs into one ordered list.
+  // The "primary" run shown in charts is just the selected version.
+  // Comparison overlays are appended; switching versions does NOT clear them.
   const allRuns = useMemo(() => {
-    const native: ComparisonRunPick[] =
-      runsState.data?.map((r) => ({
-        hash: r.hash,
-        name: r.name,
-        experiment: r.experiment,
-      })) ?? [];
+    const native: ComparisonRunPick[] = selectedVersion
+      ? [
+          {
+            hash: selectedVersion.run.hash,
+            name: selectedVersion.label,
+            experiment: selectedVersion.run.experiment,
+          },
+        ]
+      : [];
     return [...native, ...comparison.filter((c) => !native.find((n) => n.hash === c.hash))];
-  }, [runsState.data, comparison]);
+  }, [selectedVersion, comparison]);
+
+  // Per-run metadata: active flag + creationMs (for wall-time x-axis).
+  const runMeta = useMemo(() => {
+    const map: Record<
+      string,
+      { active: boolean; creationMs: number; experiment: string; name: string }
+    > = {};
+    if (selectedVersion) {
+      const r = selectedVersion.run;
+      map[r.hash] = {
+        active: r.active,
+        creationMs: new Date(r.creation_time).getTime(),
+        experiment: r.experiment,
+        name: selectedVersion.label,
+      };
+    }
+    // Comparison runs default to inactive — we don't poll them.
+    for (const c of comparison) {
+      map[c.hash] ??= {
+        active: false,
+        creationMs: 0,
+        experiment: c.experiment,
+        name: c.name,
+      };
+    }
 
   // Per-run metadata: active flag + creationMs (for wall-time x-axis).
   const runMeta = useMemo(() => {
