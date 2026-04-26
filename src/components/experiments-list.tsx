@@ -229,14 +229,14 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
 
       {/* List */}
       <div className="rounded-lg border border-border bg-card overflow-hidden">
-        <div className="grid grid-cols-[28px_minmax(0,1fr)_110px_140px_120px_120px_90px_80px] gap-3 border-b border-border bg-surface px-3 py-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+        <div className="grid grid-cols-[28px_minmax(260px,1fr)_140px_140px_120px_110px_110px_90px] gap-3 border-b border-border bg-surface px-3 py-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
           <span></span>
           <span>Experiment</span>
           <span>State</span>
           <span>GPU</span>
           <span>Started</span>
           <span>Duration</span>
-          <span className="text-right">Runs</span>
+          <span className="text-right">Versions</span>
           <span className="text-right">Outcome</span>
         </div>
 
@@ -382,7 +382,7 @@ function ExperimentRow({
         <span className="absolute left-0 top-0 h-full w-0.5 bg-primary" />
       )}
       <div
-        className="grid grid-cols-[28px_minmax(0,1fr)_110px_140px_120px_120px_90px_80px] gap-3 items-center px-3 py-2 cursor-pointer hover:bg-muted/50"
+        className="grid grid-cols-[28px_minmax(260px,1fr)_140px_140px_120px_110px_110px_90px] gap-3 items-center px-3 py-2 cursor-pointer hover:bg-muted/50"
         onClick={onSelect}
         onDoubleClick={onToggle}
       >
@@ -402,7 +402,7 @@ function ExperimentRow({
         </button>
         <Link
           to="/experiment"
-          search={{ name: experiment.name }}
+          search={{ name: experiment.name, version: "latest" }}
           onClick={(e) => e.stopPropagation()}
           className="flex items-center gap-2 min-w-0"
         >
@@ -422,7 +422,7 @@ function ExperimentRow({
           <span className="truncate">{experiment.gpu_type || "—"}</span>
         </span>
         <span
-          className="text-xs text-muted-foreground font-mono text-tabular"
+          className="text-xs text-muted-foreground font-mono text-tabular truncate"
           title={formatTimestamp(experiment.started_at)}
         >
           {formatRelative(experiment.started_at)}
@@ -430,8 +430,8 @@ function ExperimentRow({
         <span className="text-xs text-foreground font-mono text-tabular">
           {formatDuration(experiment.duration)}
         </span>
-        <span className="text-xs text-foreground font-mono text-tabular text-right">
-          {experiment.run_count}
+        <span className="text-right">
+          <VersionBadge count={experiment.run_count} />
         </span>
         <span className="text-right">
           <OutcomeBadge outcome={experiment.outcome} />
