@@ -6,6 +6,13 @@ import type {
   MetricSeries,
   Run,
 } from "./types";
+import {
+  seedColors,
+  seedExperiments,
+  seedIncludes,
+  seedMetric,
+  seedRuns,
+} from "./seed-data";
 
 const BASE = "/api";
 
@@ -15,22 +22,54 @@ async function getJSON<T>(path: string, signal?: AbortSignal): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** Wraps a real API call with a deterministic seed-data fallback so the
+ *  dashboard is fully reviewable when the Go backend isn't reachable. */
+async function withSeed<T>(
+  call: () => Promise<T>,
+  seed: () => T,
+  signal?: AbortSignal,
+): Promise<T> {
+  try {
+    return await call();
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    // Network / 404 / parse error → serve the seed dataset so the UI stays
+    // navigable. We deliberately don't log noisily on every poll tick.
+    return seed();
+  }
+}
+
 export const api = {
   experiments: (signal?: AbortSignal) =>
-    getJSON<Experiment[]>("/experiments", signal),
+    withSeed(() => getJSON<Experiment[]>("/experiments", signal), seedExperiments, signal),
   runs: (experiment: string, signal?: AbortSignal) =>
-    getJSON<Run[]>(`/experiments/${encodeURIComponent(experiment)}/runs`, signal),
+    withSeed(
+      () => getJSON<Run[]>(`/experiments/${encodeURIComponent(experiment)}/runs`, signal),
+      () => seedRuns(experiment),
+      signal,
+    ),
   includes: (experiment: string, signal?: AbortSignal) =>
-    getJSON<IncludesResponse>(
-      `/experiments/${encodeURIComponent(experiment)}/includes`,
+    withSeed(
+      () =>
+        getJSON<IncludesResponse>(
+          `/experiments/${encodeURIComponent(experiment)}/includes`,
+          signal,
+        ),
+      () => seedIncludes(experiment),
       signal,
     ),
   metric: (hash: string, name: string, signal?: AbortSignal) =>
-    getJSON<MetricSeries>(
-      `/runs/${encodeURIComponent(hash)}/metrics/${encodeURIComponent(name)}`,
+    withSeed(
+      () =>
+        getJSON<MetricSeries>(
+          `/runs/${encodeURIComponent(hash)}/metrics/${encodeURIComponent(name)}`,
+          signal,
+        ),
+      () => seedMetric(hash, name),
       signal,
     ),
-  colors: (signal?: AbortSignal) => getJSON<ColorsResponse>("/config/colors", signal),
+  colors: (signal?: AbortSignal) =>
+    withSeed(() => getJSON<ColorsResponse>("/config/colors", signal), seedColors, signal),
   health: (signal?: AbortSignal) => getJSON<HealthResponse>("/health", signal),
 };
 
