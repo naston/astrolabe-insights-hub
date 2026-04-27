@@ -594,7 +594,7 @@ function RunRow({
       >
         {formatRelative(run.creation_time)}
       </span>
-      <span className="font-mono text-tabular">{formatDuration(run.duration)}</span>
+      <span className="font-mono text-tabular">{run.duration || "—"}</span>
       <span className="text-right font-mono text-tabular">
         {run.final_loss != null ? run.final_loss.toFixed(4) : "—"}
       </span>

@@ -91,8 +91,8 @@ interface VersionInfo {
   label: string;
   /** All runs that belong to this version (e.g., BERT + LatentBERT). */
   runs: Run[];
-  /** Earliest creation_time across the version's runs — used for ordering and "age". */
-  createdAt: string;
+  /** Earliest creation_time (Unix seconds) across the version's runs — used for ordering and "age". */
+  createdAt: number;
 }
 
 function ExperimentBody({
@@ -137,15 +137,14 @@ function ExperimentBody({
     }
     return Array.from(byVersion.entries())
       .map(([label, runs]): VersionInfo => {
-        const createdAt = runs
-          .map((r) => r.creation_time)
-          .sort()[0] ?? new Date(0).toISOString();
+        // creation_time is Unix seconds (number) from the Aim REST API.
+        // Math.min for proper numeric comparison, not Array.sort()
+        // which would default to string-lexicographic ordering.
+        const createdAt =
+          runs.length > 0 ? Math.min(...runs.map((r) => r.creation_time)) : 0;
         return { label, runs, createdAt };
       })
-      .sort(
-        (a, b) =>
-          new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
-      );
+      .sort((a, b) => a.createdAt - b.createdAt);
   }, [runsState.data]);
 
   // Resolve the selected version. "latest" tracks the most recent submit.
@@ -215,7 +214,8 @@ function ExperimentBody({
       for (const r of v.runs) {
         map[r.hash] = {
           active: r.active,
-          creationMs: new Date(r.creation_time).getTime(),
+          // creation_time from the Go API is Unix seconds (float).
+          creationMs: r.creation_time * 1000,
           experiment: r.experiment,
           name: r.name,
           version: v.label,
@@ -276,7 +276,14 @@ function ExperimentBody({
   const metricNames = useMemo(() => {
     const set = new Set<string>();
     for (const r of runsState.data ?? []) {
-      for (const m of r.metrics ?? []) set.add(m.name);
+      for (const m of r.metrics ?? []) {
+        // wall_time is logged by the AstrolabeLogger as a way to map
+        // step → elapsed-seconds for the X-axis "Wall time" toggle.
+        // It's not a metric researchers care to plot on its own; hide
+        // it from the metric list (and therefore the chart panel).
+        if (m.name === "wall_time") continue;
+        set.add(m.name);
+      }
     }
     // Always offer the canonical primary metric even if no run has reported it yet
     if (!set.size) set.add(PRIMARY_METRIC);

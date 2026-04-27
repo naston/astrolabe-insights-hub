@@ -14,11 +14,24 @@ export function formatDuration(seconds: number | null | undefined): string {
   return rh > 0 ? `${d}d ${rh}h` : `${d}d`;
 }
 
-export function formatRelative(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const t = new Date(iso).getTime();
-  if (!isFinite(t)) return "—";
-  const diff = (Date.now() - t) / 1000;
+/** Convert a timestamp value (ISO string OR Unix seconds-as-number) to ms. */
+function toMs(value: string | number | null | undefined): number | null {
+  if (value == null) return null;
+  if (typeof value === "number") {
+    if (!isFinite(value) || value <= 0) return null;
+    // The Aim REST API returns creation_time / end_time as Unix
+    // seconds (float). Convert to ms for Date.
+    return value * 1000;
+  }
+  const ms = new Date(value).getTime();
+  if (!isFinite(ms)) return null;
+  return ms;
+}
+
+export function formatRelative(value: string | number | null | undefined): string {
+  const ms = toMs(value);
+  if (ms == null) return "—";
+  const diff = (Date.now() - ms) / 1000;
   if (diff < 5) return "just now";
   if (diff < 60) return `${Math.round(diff)}s ago`;
   if (diff < 3600) return `${Math.round(diff / 60)}m ago`;
@@ -26,11 +39,10 @@ export function formatRelative(iso: string | null | undefined): string {
   return `${Math.round(diff / 86400)}d ago`;
 }
 
-export function formatTimestamp(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return "—";
-  return d.toLocaleString(undefined, {
+export function formatTimestamp(value: string | number | null | undefined): string {
+  const ms = toMs(value);
+  if (ms == null) return "—";
+  return new Date(ms).toLocaleString(undefined, {
     month: "short",
     day: "numeric",
     hour: "2-digit",

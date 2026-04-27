@@ -56,10 +56,13 @@ export interface Run {
    * dashboard treats the run as version "v1".
    */
   version?: string;
-  creation_time: string;
-  end_time: string | null;
+  /** Unix timestamp (seconds, float) when the run was created. */
+  creation_time: number;
+  /** Unix timestamp (seconds, float) when the run ended; 0 if active. */
+  end_time: number | null;
   active: boolean;
-  duration: number;
+  /** Pre-formatted duration string from the Go API (e.g. "5m 12s", "2h 15m"). */
+  duration: string;
   metrics: RunMetricRef[];
   final_loss: number | null;
 }

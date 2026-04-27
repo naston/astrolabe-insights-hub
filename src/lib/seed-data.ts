@@ -106,6 +106,19 @@ const SPECS: SeedSpec[] = [
   },
 ];
 
+/** Format an integer-seconds duration into the "5m 12s" / "2h 15m" shape
+ *  the Go API emits. Used by seed-data so the demo runs match the live
+ *  API's data shape. */
+function formatRunDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  if (m < 60) return s > 0 ? `${m}m ${s}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return rm > 0 ? `${h}h ${rm}m` : `${h}h`;
+}
+
 function buildHistory(states: ExperimentState[], latestStartMs: number, durationSec: number) {
   const slice = durationSec / Math.max(1, states.length);
   return states.map((s, i) => ({
@@ -190,10 +203,12 @@ export function seedRuns(experiment: string): Run[] {
         name: runName,
         experiment,
         version: `v${v}`,
-        creation_time: new Date(versionStartMs).toISOString(),
-        end_time: endMs ? new Date(endMs).toISOString() : null,
+        // Match the Aim REST API shape: creation_time / end_time are
+        // Unix seconds (float), duration is a pre-formatted string.
+        creation_time: versionStartMs / 1000,
+        end_time: endMs ? endMs / 1000 : null,
         active: versionActive,
-        duration: runDuration,
+        duration: formatRunDuration(runDuration),
         metrics: [
           { name: "train/loss", context: null },
           { name: "eval/loss", context: null },
