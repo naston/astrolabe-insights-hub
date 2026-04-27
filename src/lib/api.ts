@@ -16,14 +16,34 @@ import {
 
 const BASE = "/api";
 
+/**
+ * The seed-data fallback exists so the dashboard is fully reviewable
+ * during design iteration without a live backend. It is NOT something a
+ * production deployment should be silently serving — researchers seeing
+ * fake experiments instead of "the API is down" would be a real footgun.
+ *
+ * Gate it behind a `?demo=1` query string so the design preview is
+ * opt-in. Production astrolabe NUCs don't append `?demo=1`, so any API
+ * failure surfaces as an empty / errored state via the polling hook.
+ */
+function isDemoMode(): boolean {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).get("demo") === "1";
+}
+
+const DEMO_MODE = isDemoMode();
+
 async function getJSON<T>(path: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${BASE}${path}`, { signal });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText} — ${path}`);
   return (await res.json()) as T;
 }
 
-/** Wraps a real API call with a deterministic seed-data fallback so the
- *  dashboard is fully reviewable when the Go backend isn't reachable. */
+/** Wraps a real API call with a seed-data fallback that fires only in
+ *  demo mode (`?demo=1`). In production the fallback is a no-op
+ *  pass-through; errors propagate to the caller's polling hook so the
+ *  dashboard surfaces them honestly instead of papering over with fake
+ *  experiments. */
 async function withSeed<T>(
   call: () => Promise<T>,
   seed: () => T,
@@ -33,8 +53,9 @@ async function withSeed<T>(
     return await call();
   } catch (err) {
     if (signal?.aborted) throw err;
-    // Network / 404 / parse error → serve the seed dataset so the UI stays
-    // navigable. We deliberately don't log noisily on every poll tick.
+    if (!DEMO_MODE) throw err;
+    // Demo mode: serve the seed dataset so the UI stays navigable for
+    // design previews. We deliberately don't log noisily on every tick.
     return seed();
   }
 }
