@@ -120,15 +120,16 @@ export function MetricChart({
     for (const run of runs) {
       const series = seriesByRun[run.hash];
       if (!series) continue;
-      const start = runCreationMs[run.hash] ?? 0;
       for (let i = 0; i < series.steps.length; i++) {
         const step = series.steps[i];
         const value = series.values[i];
         if (value == null || !isFinite(value)) continue;
+        // wall_times from the callback are seconds-elapsed-since-run-start
+        // (NOT epoch timestamps). Display as elapsed time. When missing,
+        // fall back to step number — a researcher seeing "step 50" instead
+        // of "5m" is at least not wrong.
         const wall =
-          series.wall_times?.[i] != null
-            ? series.wall_times[i] * 1000
-            : start + step * 1000;
+          series.wall_times?.[i] != null ? series.wall_times[i] : step;
         const x = xMode === "step" ? step : wall;
         const existing = map.get(x) ?? { x };
         existing[run.hash] = value;
@@ -225,12 +226,7 @@ export function MetricChart({
                 stroke="var(--muted-foreground)"
                 tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
                 tickFormatter={(v: number) =>
-                  xMode === "step"
-                    ? formatStep(v)
-                    : new Date(v).toLocaleTimeString([], {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })
+                  xMode === "step" ? formatStep(v) : formatElapsed(v)
                 }
               />
               <YAxis
@@ -299,6 +295,36 @@ function formatY(v: number): string {
   return v.toFixed(4);
 }
 
+/**
+ * Format elapsed seconds (since run start) for the X-axis / tooltip.
+ *
+ * The callback writes wall_time as elapsed-seconds. Showing it as a
+ * clock time ("13:30") confused researchers because it's not a clock
+ * time — it's "how long has this run been training." Format as
+ * elapsed: "30s" / "12m" / "2h 5m" / "1d 3h".
+ */
+function formatElapsed(seconds: number, opts: { precise?: boolean } = {}): string {
+  if (!isFinite(seconds) || seconds < 0) return "—";
+  const s = Math.round(seconds);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) {
+    if (opts.precise) {
+      const r = s % 60;
+      return r > 0 ? `${m}m ${r}s` : `${m}m`;
+    }
+    return `${m}m`;
+  }
+  const h = Math.floor(m / 60);
+  if (h < 24) {
+    const rm = m % 60;
+    return rm > 0 ? `${h}h ${rm}m` : `${h}h`;
+  }
+  const d = Math.floor(h / 24);
+  const rh = h % 24;
+  return rh > 0 ? `${d}d ${rh}h` : `${d}d`;
+}
+
 interface TooltipProps {
   active?: boolean;
   payload?: Array<{ dataKey: string; value: number; color: string }>;
@@ -315,7 +341,7 @@ function ChartTooltip({ active, payload, label, runs, xMode }: TooltipProps) {
       <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
         {xMode === "step"
           ? `step ${formatStep(label)}`
-          : new Date(label).toLocaleTimeString()}
+          : `+${formatElapsed(label, { precise: true })}`}
       </div>
       <ul className="space-y-0.5">
         {payload
