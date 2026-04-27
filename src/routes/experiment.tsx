@@ -175,8 +175,70 @@ function ExperimentBody({
   }, []);
 
   // Comparison runs (from other experiments) — held in local state.
+  // Seeded from the experiment's --include list (the astrolabe submit
+  // flag), then user-extendable via the "Add comparison runs" modal.
+  // Without this fetch the --include flag is silently ignored on the
+  // dashboard side: the Go API exposes /api/experiments/{name}/includes
+  // but nothing reads it.
   const [comparison, setComparison] = useState<ComparisonRunPick[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
+
+  // Track which run hashes the user has explicitly removed via the X
+  // button. We respect those across re-fetches of /includes so the
+  // include doesn't keep re-adding a run the user dismissed.
+  const [removedFromIncludes, setRemovedFromIncludes] = useState<Set<string>>(
+    new Set(),
+  );
+
+  // Fetch and auto-populate comparison runs from the experiment's
+  // --include list. Reruns when the experiment changes (deep links from
+  // Linear / git tags). Polls at the experiment-list cadence so newly
+  // landed runs from an included experiment appear without a refresh.
+  useEffect(() => {
+    if (!experimentName) return;
+    let cancelled = false;
+    const ctrl = new AbortController();
+    async function load() {
+      try {
+        const data = await api.includes(experimentName, ctrl.signal);
+        if (cancelled) return;
+        const seedHashes: ComparisonRunPick[] = [];
+        for (const group of data.includes ?? []) {
+          for (const run of group.runs ?? []) {
+            // The Go API for /includes returns run hashes as strings;
+            // we don't have the run name yet (the runs response is the
+            // source of truth for that). Use the hash as a placeholder
+            // name; the legend will resolve via the runs lookup once
+            // the comparison run loads.
+            const hash = typeof run === "string" ? run : (run as { hash?: string }).hash;
+            if (hash && !removedFromIncludes.has(hash)) {
+              seedHashes.push({
+                hash,
+                name: group.name,
+                experiment: group.name,
+              });
+            }
+          }
+        }
+        // Merge: keep user-added comparisons that aren't in the include
+        // (so the modal-driven additions persist alongside the auto-seed).
+        setComparison((prev) => {
+          const seen = new Set(seedHashes.map((s) => s.hash));
+          const userOnly = prev.filter((p) => !seen.has(p.hash));
+          return [...seedHashes, ...userOnly];
+        });
+      } catch {
+        /* keep prior state on error — quiet polling */
+      }
+    }
+    load();
+    const id = window.setInterval(load, RUNS_POLL_MS);
+    return () => {
+      cancelled = true;
+      ctrl.abort();
+      window.clearInterval(id);
+    };
+  }, [experimentName, removedFromIncludes]);
 
   // The detail page overlays the runs of one *version* (the selected version
   // — typically "latest"). The version selector picks which submit's runs
@@ -573,11 +635,19 @@ function ExperimentBody({
                       </button>
                       {isComparison && (
                         <button
-                          onClick={() =>
+                          onClick={() => {
                             setComparison((prev) =>
                               prev.filter((c) => c.hash !== r.hash),
-                            )
-                          }
+                            );
+                            // Suppress this hash from the auto-include
+                            // refetch loop so it doesn't re-appear on
+                            // the next poll. Modal re-add (re-include
+                            // via the modal) clears it; full page
+                            // reload also clears.
+                            setRemovedFromIncludes(
+                              (prev) => new Set([...prev, r.hash]),
+                            );
+                          }}
                           className="opacity-0 group-hover:opacity-100 transition-opacity rounded p-0.5 text-muted-foreground hover:text-destructive hover:bg-muted"
                           aria-label="Remove comparison run"
                           title="Remove comparison run"
@@ -664,6 +734,14 @@ function ExperimentBody({
           setComparison((prev) =>
             prev.find((c) => c.hash === run.hash) ? prev : [...prev, run],
           );
+          // If this run was previously removed (X), un-suppress it so
+          // re-adding via the modal sticks across the next include refetch.
+          setRemovedFromIncludes((prev) => {
+            if (!prev.has(run.hash)) return prev;
+            const next = new Set(prev);
+            next.delete(run.hash);
+            return next;
+          });
         }}
       />
     </AppShell>
