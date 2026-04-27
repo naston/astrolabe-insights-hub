@@ -238,6 +238,12 @@ export function MetricChart({
                 tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
                 width={48}
                 tickFormatter={(v: number) => formatY(v)}
+                // Default Recharts domain is [0, dataMax] which wastes
+                // vertical space and squashes the actually-interesting
+                // range when loss values cluster (e.g. eval/loss between
+                // 2.4 and 2.6). 'auto' lets Recharts pick min/max from
+                // the visible data with sensible padding.
+                domain={["auto", "auto"]}
               />
               <Tooltip
                 cursor={{ stroke: "var(--border-strong)", strokeWidth: 1 }}
