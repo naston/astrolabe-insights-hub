@@ -1,17 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import {
   ChevronDown,
   ChevronRight,
   Cpu,
-  Filter as FilterIcon,
   Keyboard,
   RefreshCw,
   Search,
 } from "lucide-react";
 
 import { api } from "@/lib/api";
-import type { Experiment, Run } from "@/lib/types";
+import type { Experiment, ExperimentState, Run } from "@/lib/types";
 import { usePolling } from "@/hooks/use-polling";
 import {
   formatDuration,
@@ -23,10 +22,68 @@ import {
 } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
+import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { FilterDropdown } from "@/components/filter-dropdown";
 import { StatusDot } from "@/components/status-dot";
 import { OutcomeBadge, StateBadge } from "@/components/state-badge";
 import { FreshnessPill } from "@/components/freshness-pill";
 import { Kbd } from "@/components/shortcuts-help";
+
+/**
+ * Status filter buckets the FSM into four user-facing states.
+ *
+ * The actual ExperimentState enum has 8 values (PENDING, ACQUIRING,
+ * SETUP, RUNNING, HEALING, SUMMARIZING, COMPLETED, FAILED). The filter
+ * shelf collapses them to four buckets the operator actually thinks in:
+ *
+ * - running: any active state (ACQUIRING, SETUP, RUNNING, HEALING, SUMMARIZING)
+ * - completed
+ * - failed
+ * - pending
+ */
+type StatusBucket = "running" | "completed" | "failed" | "pending";
+const STATUS_OPTIONS: { value: StatusBucket; label: string }[] = [
+  { value: "running", label: "Running" },
+  { value: "completed", label: "Completed" },
+  { value: "failed", label: "Failed" },
+  { value: "pending", label: "Pending" },
+];
+
+function statusBucket(state: ExperimentState): StatusBucket {
+  if (state === "COMPLETED") return "completed";
+  if (state === "FAILED") return "failed";
+  if (state === "PENDING") return "pending";
+  return "running";
+}
+
+type SortKey = "recent" | "oldest" | "name" | "runs" | "status";
+const SORT_OPTIONS: { value: SortKey; label: string }[] = [
+  { value: "recent", label: "Most recent" },
+  { value: "oldest", label: "Oldest" },
+  { value: "name", label: "Name (A–Z)" },
+  { value: "runs", label: "Run count" },
+  { value: "status", label: "Status (active first)" },
+];
+
+const STATUS_RANK: Record<StatusBucket, number> = {
+  running: 0,
+  pending: 1,
+  completed: 2,
+  failed: 3,
+};
+
+/** Decode a comma-joined search-param value into a list. */
+function decodeList(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+/** Encode a list as a comma-joined search-param value (or undefined when empty). */
+function encodeList(values: string[]): string | undefined {
+  if (values.length === 0) return undefined;
+  return values.join(",");
+}
 
 const POLL_MS = 3000;
 
@@ -46,24 +103,101 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
 
   const experiments = useMemo(() => data ?? [], [data]);
 
-  // Repo filter (multi-select chip group) + free-text filter
+  // URL-state-driven filters + sort. The route validates these via
+  // validateSearch so they always have a defined shape, but values
+  // outside the known SortKey / StatusBucket sets fall through to
+  // sensible defaults below.
+  const search = useSearch({ from: "/" });
+  const navigate = useNavigate({ from: "/" });
+
+  const selectedStatus = decodeList(search.status);
+  const selectedSubmitter = decodeList(search.submitter);
+  const selectedRepo = decodeList(search.repo);
+  const sortKey: SortKey = (
+    SORT_OPTIONS.some((o) => o.value === search.sort)
+      ? (search.sort as SortKey)
+      : "recent"
+  );
+
+  const updateSearch = (next: Partial<{
+    status: string[];
+    submitter: string[];
+    repo: string[];
+    sort: SortKey;
+  }>) => {
+    navigate({
+      search: (prev) => ({
+        ...prev,
+        ...(next.status !== undefined && { status: encodeList(next.status) }),
+        ...(next.submitter !== undefined && { submitter: encodeList(next.submitter) }),
+        ...(next.repo !== undefined && { repo: encodeList(next.repo) }),
+        ...(next.sort !== undefined && { sort: next.sort === "recent" ? undefined : next.sort }),
+      }),
+      replace: true,
+    });
+  };
+
+  const resetFilters = () =>
+    navigate({ search: () => ({}), replace: true });
+
+  // Free-text filter — local-only, doesn't survive page reload by
+  // design (it's an in-the-moment scan, not a saved view).
   const [filter, setFilter] = useState("");
-  const [activeRepo, setActiveRepo] = useState<string | "all">("all");
   const filterInputRef = useRef<HTMLInputElement>(null);
 
-  const repos = useMemo(() => {
+  // Available filter values, derived from the loaded experiment list
+  // with counts for the dropdown's right-side hint.
+  const submitterOptions = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const e of experiments) {
+      const key = e.submitted_by || "unknown";
+      map.set(key, (map.get(key) ?? 0) + 1);
+    }
+    return Array.from(map.entries()).map(([value, count]) => ({
+      value,
+      label: value,
+      count,
+    }));
+  }, [experiments]);
+
+  const repoOptions = useMemo(() => {
     const map = new Map<string, number>();
     for (const e of experiments) {
       const r = inferRepo(e);
       map.set(r, (map.get(r) ?? 0) + 1);
     }
-    return Array.from(map.entries()).sort((a, b) => b[1] - a[1]);
+    return Array.from(map.entries()).map(([value, count]) => ({
+      value,
+      label: value,
+      count,
+    }));
+  }, [experiments]);
+
+  const statusOptions = useMemo(() => {
+    const counts = new Map<StatusBucket, number>();
+    for (const e of experiments) {
+      const b = statusBucket(e.state);
+      counts.set(b, (counts.get(b) ?? 0) + 1);
+    }
+    return STATUS_OPTIONS.map((opt) => ({
+      ...opt,
+      count: counts.get(opt.value) ?? 0,
+    }));
   }, [experiments]);
 
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();
     return experiments.filter((e) => {
-      if (activeRepo !== "all" && inferRepo(e) !== activeRepo) return false;
+      if (selectedStatus.length > 0 && !selectedStatus.includes(statusBucket(e.state))) {
+        return false;
+      }
+      if (selectedSubmitter.length > 0) {
+        const sub = e.submitted_by || "unknown";
+        if (!selectedSubmitter.includes(sub)) return false;
+      }
+      if (selectedRepo.length > 0 && !selectedRepo.includes(inferRepo(e))) {
+        return false;
+      }
       if (!q) return true;
       return (
         e.name.toLowerCase().includes(q) ||
@@ -71,7 +205,34 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
         e.state.toLowerCase().includes(q)
       );
     });
-  }, [experiments, filter, activeRepo]);
+  }, [experiments, filter, selectedStatus, selectedSubmitter, selectedRepo]);
+
+  const sorted = useMemo(() => {
+    const list = [...filtered];
+    switch (sortKey) {
+      case "oldest":
+        list.sort((a, b) => (a.started_at ?? "").localeCompare(b.started_at ?? ""));
+        break;
+      case "name":
+        list.sort((a, b) => a.name.localeCompare(b.name));
+        break;
+      case "runs":
+        list.sort((a, b) => b.run_count - a.run_count);
+        break;
+      case "status":
+        list.sort((a, b) => STATUS_RANK[statusBucket(a.state)] - STATUS_RANK[statusBucket(b.state)]);
+        break;
+      case "recent":
+      default:
+        list.sort((a, b) => (b.started_at ?? "").localeCompare(a.started_at ?? ""));
+    }
+    return list;
+  }, [filtered, sortKey]);
+
+  const anyFilterActive =
+    selectedStatus.length > 0 ||
+    selectedSubmitter.length > 0 ||
+    selectedRepo.length > 0;
 
   const counts = useMemo(() => {
     const total = experiments.length;
@@ -84,13 +245,12 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
   // Selection + keyboard nav
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const navigate = useNavigate();
   const rowRefs = useRef<Record<number, HTMLElement | null>>({});
 
-  // Reset selection when filter changes
+  // Reset selection when filter / sort changes
   useEffect(() => {
     setSelectedIdx(0);
-  }, [filter, activeRepo]);
+  }, [filter, selectedStatus, selectedSubmitter, selectedRepo, sortKey]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -123,12 +283,12 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
 
       if (e.key === "j") {
         e.preventDefault();
-        setSelectedIdx((i) => Math.min(filtered.length - 1, i + 1));
+        setSelectedIdx((i) => Math.min(sorted.length - 1, i + 1));
       } else if (e.key === "k") {
         e.preventDefault();
         setSelectedIdx((i) => Math.max(0, i - 1));
       } else if (e.key === "Enter") {
-        const exp = filtered[selectedIdx];
+        const exp = sorted[selectedIdx];
         if (exp) {
           e.preventDefault();
           navigate({
@@ -137,7 +297,7 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
           });
         }
       } else if (e.key === "x" || e.key === "o") {
-        const exp = filtered[selectedIdx];
+        const exp = sorted[selectedIdx];
         if (exp) {
           e.preventDefault();
           setExpanded((m) => ({ ...m, [exp.name]: !m[exp.name] }));
@@ -149,7 +309,7 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [filtered, selectedIdx, navigate, filter, refetch]);
+  }, [sorted, selectedIdx, navigate, filter, refetch]);
 
   // Scroll selected row into view
   useEffect(() => {
@@ -168,37 +328,54 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
       </div>
 
       {/* Filter bar */}
-      <div className="flex items-center gap-2">
-        <div className="relative flex-1 max-w-md">
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="relative max-w-md">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
           <input
             ref={filterInputRef}
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
-            placeholder="Filter experiments…"
-            className="w-full rounded-md border border-border bg-surface pl-8 pr-12 py-1.5 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring focus:border-ring transition"
+            placeholder="Filter…"
+            className="w-44 rounded-md border border-border bg-surface pl-8 pr-12 py-1.5 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring focus:border-ring transition"
           />
           <Kbd className="absolute right-2 top-1/2 -translate-y-1/2">/</Kbd>
         </div>
 
-        <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-thin">
-          <FilterIcon className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-          <RepoChip
-            label="All"
-            count={counts.total}
-            active={activeRepo === "all"}
-            onClick={() => setActiveRepo("all")}
-          />
-          {repos.map(([repo, count]) => (
-            <RepoChip
-              key={repo}
-              label={repo}
-              count={count}
-              active={activeRepo === repo}
-              onClick={() => setActiveRepo(repo)}
-            />
-          ))}
-        </div>
+        <FilterDropdown
+          label="Status"
+          options={statusOptions}
+          selected={selectedStatus}
+          onChange={(next) => updateSearch({ status: next })}
+        />
+        <FilterDropdown
+          label="Submitter"
+          options={submitterOptions}
+          selected={selectedSubmitter}
+          onChange={(next) => updateSearch({ submitter: next })}
+        />
+        <FilterDropdown
+          label="Repo"
+          options={repoOptions}
+          selected={selectedRepo}
+          onChange={(next) => updateSearch({ repo: next })}
+        />
+
+        {/* Sort dropdown — single-select. Reuses FilterDropdown's
+            popover trigger but with single-pick semantics handled by
+            wrapping a native <select>. Cleaner UX would be a separate
+            component; FilterDropdown's checkbox interaction works fine
+            for multi-select but reads weirdly for single-select. */}
+        <SortDropdown value={sortKey} onChange={(v) => updateSearch({ sort: v })} />
+
+        {anyFilterActive && (
+          <button
+            type="button"
+            onClick={resetFilters}
+            className="text-xs text-muted-foreground hover:text-foreground"
+          >
+            Reset filters
+          </button>
+        )}
 
         <div className="ml-auto flex items-center gap-2">
           <FreshnessPill
@@ -246,7 +423,7 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
           </div>
         )}
 
-        {!error && filtered.length === 0 && (
+        {!error && sorted.length === 0 && (
           <div className="px-4 py-12 text-center text-sm text-muted-foreground">
             {experiments.length === 0
               ? "Waiting for the orchestrator…"
@@ -255,7 +432,7 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
         )}
 
         <ul className="divide-y divide-border">
-          {filtered.map((exp, idx) => (
+          {sorted.map((exp, idx) => (
             <ExperimentRow
               key={exp.name}
               ref={(el) => {
@@ -275,7 +452,7 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
 
       <div className="flex items-center justify-between text-[11px] text-muted-foreground font-mono">
         <span>
-          {filtered.length} of {experiments.length} experiments
+          {sorted.length} of {experiments.length} experiments
         </span>
         <span className="flex items-center gap-2">
           <Kbd>j</Kbd>
@@ -324,30 +501,53 @@ function KpiCard({ label, value, accent, pulse }: KpiProps) {
   );
 }
 
-function RepoChip({
-  label,
-  count,
-  active,
-  onClick,
+/**
+ * Single-select sort dropdown next to the filter shelf.
+ *
+ * Uses the same Popover trigger shape as FilterDropdown for visual
+ * consistency, but with single-pick semantics — clicking an option
+ * applies it and closes the popover. Default sort ("recent") shows
+ * just "Sort" on the trigger; everything else shows "Sort: <label>".
+ */
+function SortDropdown({
+  value,
+  onChange,
 }: {
-  label: string;
-  count: number;
-  active: boolean;
-  onClick: () => void;
+  value: SortKey;
+  onChange: (next: SortKey) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const current = SORT_OPTIONS.find((o) => o.value === value);
+  const triggerText =
+    value === "recent" ? "Sort" : `Sort: ${current?.label ?? value}`;
+
   return (
-    <button
-      onClick={onClick}
-      className={cn(
-        "shrink-0 inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors",
-        active
-          ? "border-primary/40 bg-[color-mix(in_oklab,var(--primary)_15%,transparent)] text-foreground"
-          : "border-border bg-surface text-muted-foreground hover:text-foreground hover:border-border-strong",
-      )}
-    >
-      <span className="font-medium">{label}</span>
-      <span className="font-mono text-[10px] text-tabular opacity-70">{count}</span>
-    </button>
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button variant="outline" size="sm" className="ml-auto">
+          {triggerText}
+          <ChevronDown className="ml-2 h-3 w-3" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-44 p-1">
+        {SORT_OPTIONS.map((opt) => (
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => {
+              onChange(opt.value);
+              setOpen(false);
+            }}
+            className={cn(
+              "w-full rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent",
+              opt.value === value && "bg-accent text-accent-foreground",
+            )}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </PopoverContent>
+    </Popover>
   );
 }
 

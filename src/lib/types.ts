@@ -37,6 +37,12 @@ export interface Experiment {
    * exists.
    */
   linear_doc_url?: string | null;
+  /**
+   * Submitter identity (OS username from astrolabe.user / ExperimentRecord.
+   * submitted_by). Empty string for legacy experiments that pre-date v1.2.1;
+   * the home-page Submitter filter buckets those under "unknown".
+   */
+  submitted_by?: string;
 }
 
 export interface RunMetricRef {
@@ -65,6 +71,11 @@ export interface Run {
   duration: string;
   metrics: RunMetricRef[];
   final_loss: number | null;
+  /**
+   * Submitter identity for this run. Used by the stats table to show
+   * "by alice" when comparing across users. Empty for legacy runs.
+   */
+  submitted_by?: string;
 }
 
 export interface IncludeGroup {
