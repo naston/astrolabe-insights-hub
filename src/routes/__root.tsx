@@ -1,6 +1,5 @@
-import { Outlet, Link, createRootRoute, HeadContent, Scripts } from "@tanstack/react-router";
+import { Outlet, Link, createRootRoute } from "@tanstack/react-router";
 
-import appCss from "../styles.css?url";
 import { ThemeProvider } from "@/hooks/use-theme";
 
 function NotFoundComponent() {
@@ -25,52 +24,15 @@ function NotFoundComponent() {
   );
 }
 
+// SPA mode — no shellComponent (no `<html>` or `<head>` wrapping; that's
+// in /index.html) and no `head:` config (TanStack Router-only doesn't
+// have head metadata; static title lives in /index.html). Per-route
+// page titles are set via `useEffect(() => document.title = "...")`
+// in the route components.
 export const Route = createRootRoute({
-  head: () => ({
-    meta: [
-      { charSet: "utf-8" },
-      { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Astrolabe — ML experiment orchestration" },
-      {
-        name: "description",
-        content:
-          "Astrolabe is a self-hosted ML experiment orchestration platform — track runs, compare metrics, and watch the FSM live.",
-      },
-      { name: "author", content: "Astrolabe" },
-      { property: "og:title", content: "Astrolabe — ML experiment orchestration" },
-      {
-        property: "og:description",
-        content: "Track runs, compare metrics, and watch the FSM live.",
-      },
-      { property: "og:type", content: "website" },
-      { name: "twitter:card", content: "summary" },
-      { name: "twitter:site", content: "@Lovable" },
-    ],
-    links: [
-      {
-        rel: "stylesheet",
-        href: appCss,
-      },
-    ],
-  }),
-  shellComponent: RootShell,
   component: RootComponent,
   notFoundComponent: NotFoundComponent,
 });
-
-function RootShell({ children }: { children: React.ReactNode }) {
-  return (
-    <html lang="en">
-      <head>
-        <HeadContent />
-      </head>
-      <body>
-        {children}
-        <Scripts />
-      </body>
-    </html>
-  );
-}
 
 function RootComponent() {
   return (

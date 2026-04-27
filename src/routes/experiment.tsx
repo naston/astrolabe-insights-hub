@@ -43,23 +43,6 @@ const searchSchema = z.object({
 
 export const Route = createFileRoute("/experiment")({
   validateSearch: (search: Record<string, unknown>) => searchSchema.parse(search),
-  head: ({ match }) => {
-    const name = (match.search as { name?: string }).name ?? "Experiment";
-    return {
-      meta: [
-        { title: `${name} — Astrolabe` },
-        {
-          name: "description",
-          content: `Live metrics dashboard for experiment ${name}.`,
-        },
-        { property: "og:title", content: `${name} — Astrolabe` },
-        {
-          property: "og:description",
-          content: `Live metrics dashboard for experiment ${name}.`,
-        },
-      ],
-    };
-  },
   component: ExperimentPage,
 });
 
