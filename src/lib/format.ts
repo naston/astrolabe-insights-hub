@@ -119,9 +119,30 @@ export const FSM_ORDER: ExperimentState[] = [
   "FAILED",
 ];
 
+/**
+ * Strip a git remote URL down to the repo name for display.
+ *
+ * `git@github.com:naston/ProjectOrion.git`        → `ProjectOrion`
+ * `https://github.com/naston/ProjectOrion`        → `ProjectOrion`
+ * `https://github.com/naston/ProjectOrion.git`    → `ProjectOrion`
+ *
+ * Falls back to the input string when the URL doesn't parse — better
+ * to render the raw value than render nothing.
+ */
+export function prettifyRepo(raw: string): string {
+  if (!raw) return raw;
+  // Strip a trailing .git so "Foo.git" → "Foo".
+  let s = raw.replace(/\.git$/i, "");
+  // Take the segment after the last "/" or ":" — handles both SSH
+  // (git@host:owner/repo) and HTTPS (https://host/owner/repo) forms.
+  const lastSep = Math.max(s.lastIndexOf("/"), s.lastIndexOf(":"));
+  if (lastSep >= 0) s = s.slice(lastSep + 1);
+  return s || raw;
+}
+
 /** Pull a "repo" out of an experiment name like "myrepo/exp-name". */
 export function inferRepo(exp: { repo?: string | null; name: string }): string {
-  if (exp.repo) return exp.repo;
+  if (exp.repo) return prettifyRepo(exp.repo);
   const slash = exp.name.indexOf("/");
   if (slash > 0) return exp.name.slice(0, slash);
   return "default";
