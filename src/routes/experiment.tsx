@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 
 import { api, DEFAULT_PALETTE } from "@/lib/api";
-import type { Experiment, Run } from "@/lib/types";
+import type { Experiment, MetricSeries, Run } from "@/lib/types";
 import { usePolling } from "@/hooks/use-polling";
 import {
   formatDuration,
@@ -104,10 +104,12 @@ function ExperimentPage() {
 }
 
 interface VersionInfo {
-  /** "v1", "v2", … (1-indexed, oldest first). Derived ordinal label. */
+  /** "v1", "v2", … (1-indexed, oldest first). Derived from `Run.version`. */
   label: string;
-  /** The underlying run — has its own identity (hash + name) independent of the version. */
-  run: Run;
+  /** All runs that belong to this version (e.g., BERT + LatentBERT). */
+  runs: Run[];
+  /** Earliest creation_time across the version's runs — used for ordering and "age". */
+  createdAt: string;
 }
 
 function ExperimentBody({
@@ -139,13 +141,28 @@ function ExperimentBody({
     { intervalMs: RUNS_POLL_MS },
   );
 
-  // Build the canonical version list (oldest = v1) ordered by creation_time.
+  // Group runs by version. One submit (= one version) typically contains
+  // multiple runs (one per declared training job — e.g. BERT + LatentBERT).
+  // Runs without a version field default to "v1" so legacy data still loads.
   const versions: VersionInfo[] = useMemo(() => {
-    const sorted = [...(runsState.data ?? [])].sort(
-      (a, b) =>
-        new Date(a.creation_time).getTime() - new Date(b.creation_time).getTime(),
-    );
-    return sorted.map((run, i) => ({ label: `v${i + 1}`, run }));
+    const byVersion = new Map<string, Run[]>();
+    for (const run of runsState.data ?? []) {
+      const label = run.version || "v1";
+      const list = byVersion.get(label) ?? [];
+      list.push(run);
+      byVersion.set(label, list);
+    }
+    return Array.from(byVersion.entries())
+      .map(([label, runs]): VersionInfo => {
+        const createdAt = runs
+          .map((r) => r.creation_time)
+          .sort()[0] ?? new Date(0).toISOString();
+        return { label, runs, createdAt };
+      })
+      .sort(
+        (a, b) =>
+          new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+      );
   }, [runsState.data]);
 
   // Resolve the selected version. "latest" tracks the most recent submit.
@@ -179,22 +196,24 @@ function ExperimentBody({
   const [comparison, setComparison] = useState<ComparisonRunPick[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
 
-  // The dashboard's job is to compare runs *within* an experiment. Default
-  // view = every run of this experiment overlaid, plus comparison runs from
-  // other experiments. The version selector pins which version external
-  // links reference (and visually highlights it), but it never reduces the
-  // view to a single run — that would defeat cross-run comparison.
+  // The detail page overlays the runs of one *version* (the selected version
+  // — typically "latest"). The version selector picks which submit's runs
+  // are shown; comparison runs from OTHER experiments are appended on top.
+  // Cross-version comparison happens by switching the version selector, not
+  // by overlaying every version on the same chart (that gets unreadable
+  // fast for experiments with several runs per version).
   const allRuns = useMemo(() => {
-    const native: ComparisonRunPick[] = versions.map((v) => ({
-      hash: v.run.hash,
-      name: v.run.name,
-      experiment: v.run.experiment,
-    }));
+    const native: ComparisonRunPick[] =
+      selectedVersion?.runs.map((r) => ({
+        hash: r.hash,
+        name: r.name,
+        experiment: r.experiment,
+      })) ?? [];
     return [
       ...native,
       ...comparison.filter((c) => !native.find((n) => n.hash === c.hash)),
     ];
-  }, [versions, comparison]);
+  }, [selectedVersion, comparison]);
 
   // Per-run metadata: active flag + creationMs (for wall-time x-axis) +
   // the version label so we can show "v3" alongside the run's identity.
@@ -210,14 +229,15 @@ function ExperimentBody({
       }
     > = {};
     for (const v of versions) {
-      const r = v.run;
-      map[r.hash] = {
-        active: r.active,
-        creationMs: new Date(r.creation_time).getTime(),
-        experiment: r.experiment,
-        name: r.name,
-        version: v.label,
-      };
+      for (const r of v.runs) {
+        map[r.hash] = {
+          active: r.active,
+          creationMs: new Date(r.creation_time).getTime(),
+          experiment: r.experiment,
+          name: r.name,
+          version: v.label,
+        };
+      }
     }
     // Comparison runs from other experiments — we don't poll them, no version label.
     for (const c of comparison) {
@@ -515,16 +535,12 @@ function ExperimentBody({
                   const hidden = hiddenRuns.has(r.hash);
                   const meta = runMeta[r.hash];
                   const isComparison = comparison.some((c) => c.hash === r.hash);
-                  const isPinned =
-                    !isComparison &&
-                    selectedVersion?.run.hash === r.hash;
                   return (
                     <li
                       key={r.hash}
                       className={cn(
                         "group flex items-center gap-2 px-3 py-1.5 hover:bg-muted/50",
                         hidden && "opacity-50",
-                        isPinned && "bg-[color-mix(in_oklab,var(--primary)_8%,transparent)]",
                       )}
                     >
                       <button
@@ -636,18 +652,14 @@ function ExperimentBody({
               </div>
             )}
 
-            {/* Per-run stats — table form with one row per version. Click a row
-                to pin the URL/links to that version. */}
+            {/* Per-run stats — one row per run of the selected version, with
+                a metric + best/last selector so the headline column is
+                explicit (and "winner" gets a tinted row when best). */}
             <RunStatsTable
-              versions={versions}
+              versionLabel={selectedVersion?.label}
+              runs={selectedVersion?.runs ?? []}
               runColors={runColors}
-              pinnedHash={selectedVersion?.run.hash}
-              onPinHash={(label) =>
-                navigate({
-                  to: "/experiment",
-                  search: { name: experimentName, version: label },
-                })
-              }
+              availableMetrics={metricNames}
             />
           </aside>
         </div>
@@ -692,60 +704,207 @@ function SegButton({
   );
 }
 
+type StatsMeasurement = "best" | "last";
+
+/** Heuristic — does "best" mean min or max for this metric name? */
+function metricDirection(name: string): "min" | "max" {
+  // Loss-shaped metrics where lower is better.
+  if (/loss|error|perplexity|\bppl\b|nll/i.test(name)) return "min";
+  // Score-shaped metrics where higher is better.
+  if (/accuracy|f1|auc|precision|recall|score|\bbleu\b|\brouge\b/i.test(name))
+    return "max";
+  // Default to min for anything unclassified — most ML metrics that you'd
+  // want to "find the best of" are loss-shaped.
+  return "min";
+}
+
 /**
- * Per-run stats table for the sidebar. One row per version of the
- * experiment; columns surface what a researcher actually wants to scan
- * across runs (version, identity, status, duration, final metric).
+ * Per-run stats table for the sidebar. One row per run of the SELECTED
+ * version — the runs being compared in the charts above. For an
+ * "architecture-comparison" experiment with two models, this is two rows
+ * (BERT, LatentBERT) with their respective metrics; switching the version
+ * selector swaps which version's runs populate the table.
  *
- * Aggregate stats (best across runs, median, etc.) belong in a *table* the
- * researcher can read row-by-row, not in a four-cell `dl` that hides which
- * run the "best loss" came from. The table fills the same role with much
- * more signal per pixel.
+ * The table's headline column is configurable: the user picks which metric
+ * to show, and whether to display the **best** value (min or max depending
+ * on the metric — losses minimize, scores maximize) or the **last** logged
+ * value. Both are useful for different questions: "which run won?" wants
+ * best, "what was the run's final state?" wants last.
  */
 function RunStatsTable({
-  versions,
+  versionLabel,
+  runs,
   runColors,
-  pinnedHash,
-  onPinHash,
+  availableMetrics,
 }: {
-  versions: VersionInfo[];
+  versionLabel: string | undefined;
+  runs: Run[];
   runColors: Record<string, string>;
-  pinnedHash: string | undefined;
-  onPinHash: (versionLabel: string) => void;
+  availableMetrics: string[];
 }) {
-  if (versions.length === 0) return null;
-  // Newest first so the latest run is most reachable when scanning.
-  const ordered = [...versions].reverse();
+  // Default to train/loss when present, otherwise the first available metric.
+  const defaultMetric = useMemo(() => {
+    if (availableMetrics.includes("train/loss")) return "train/loss";
+    return availableMetrics[0] ?? "train/loss";
+  }, [availableMetrics]);
+  const [metric, setMetric] = useState<string>(defaultMetric);
+  const [measurement, setMeasurement] = useState<StatsMeasurement>("best");
+
+  // Re-default when the available list changes (e.g. switching experiments).
+  useEffect(() => {
+    if (!availableMetrics.includes(metric)) {
+      setMetric(defaultMetric);
+    }
+  }, [availableMetrics, defaultMetric, metric]);
+
+  // Fetch the chosen metric for each run. Refreshes every 5s so active runs
+  // see updated values without burning the chart-poll cadence (2s) on the
+  // sidebar.
+  const [series, setSeries] = useState<Record<string, MetricSeries | null>>({});
+  const runHashes = useMemo(() => runs.map((r) => r.hash).join(","), [runs]);
+  useEffect(() => {
+    let cancelled = false;
+    const ctrl = new AbortController();
+
+    async function fetchAll() {
+      const entries = await Promise.all(
+        runs.map(async (r): Promise<[string, MetricSeries | null]> => {
+          try {
+            const s = await api.metric(r.hash, metric, ctrl.signal);
+            return [r.hash, s];
+          } catch {
+            return [r.hash, null];
+          }
+        }),
+      );
+      if (!cancelled) {
+        setSeries(Object.fromEntries(entries));
+      }
+    }
+    fetchAll();
+    const id = window.setInterval(fetchAll, 5000);
+    return () => {
+      cancelled = true;
+      ctrl.abort();
+      window.clearInterval(id);
+    };
+  }, [runHashes, metric, runs]);
+
+  const direction = metricDirection(metric);
+  const computed = useMemo(() => {
+    const out: Record<string, number | null> = {};
+    for (const r of runs) {
+      const s = series[r.hash];
+      if (!s || s.values.length === 0) {
+        out[r.hash] = null;
+        continue;
+      }
+      if (measurement === "last") {
+        out[r.hash] = s.values[s.values.length - 1];
+      } else {
+        out[r.hash] =
+          direction === "min" ? Math.min(...s.values) : Math.max(...s.values);
+      }
+    }
+    return out;
+  }, [series, runs, measurement, direction]);
+
+  if (runs.length === 0) return null;
+
   return (
     <div className="rounded-lg border border-border bg-card overflow-hidden">
-      <div className="px-3 py-2 border-b border-border text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-        Run stats
+      <div className="px-3 py-2 border-b border-border space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+            Run stats
+          </span>
+          {versionLabel && (
+            <span className="text-[10px] font-mono text-muted-foreground">
+              {versionLabel}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1">
+          <select
+            value={metric}
+            onChange={(e) => setMetric(e.target.value)}
+            className="flex-1 min-w-0 rounded-md border border-border bg-surface px-2 py-1 text-[11px] font-mono focus:outline-none focus:ring-1 focus:ring-ring"
+            title="Metric shown in the value column"
+          >
+            {availableMetrics.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+          <div className="flex rounded-md border border-border bg-surface p-0.5 text-[11px]">
+            <button
+              type="button"
+              onClick={() => setMeasurement("best")}
+              className={cn(
+                "px-2 py-0.5 rounded transition-colors",
+                measurement === "best"
+                  ? "bg-card text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+              title={`Best value across the run (${direction === "min" ? "minimum" : "maximum"} of ${metric})`}
+            >
+              best
+            </button>
+            <button
+              type="button"
+              onClick={() => setMeasurement("last")}
+              className={cn(
+                "px-2 py-0.5 rounded transition-colors",
+                measurement === "last"
+                  ? "bg-card text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+              title={`Last logged value of ${metric}`}
+            >
+              last
+            </button>
+          </div>
+        </div>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full text-[11px] font-mono">
           <thead className="text-[10px] uppercase tracking-wider text-muted-foreground bg-muted/40">
             <tr>
-              <th className="text-left px-2 py-1.5 font-medium">ver</th>
               <th className="text-left px-2 py-1.5 font-medium">run</th>
-              <th className="text-right px-2 py-1.5 font-medium">final</th>
+              <th className="text-left px-2 py-1.5 font-medium">hash</th>
+              <th className="text-right px-2 py-1.5 font-medium" title={`${metric} · ${measurement}`}>
+                <span className="truncate inline-block max-w-[80px] align-middle">
+                  {metric}
+                </span>
+                <span className="opacity-60"> · {measurement}</span>
+              </th>
               <th className="text-right px-2 py-1.5 font-medium">dur</th>
               <th className="text-right px-2 py-1.5 font-medium">state</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
-            {ordered.map((v) => {
-              const r = v.run;
-              const isPinned = pinnedHash === r.hash;
+            {runs.map((r) => {
               const stateLabel = r.active ? "live" : r.end_time ? "done" : "—";
+              const value = computed[r.hash];
+              // Highlight the row that holds the best value across all runs
+              // — quick "which one won?" cue when measurement = best.
+              const isWinner =
+                measurement === "best" &&
+                value != null &&
+                Object.values(computed)
+                  .filter((v): v is number => v != null)
+                  .every((other) =>
+                    direction === "min" ? value <= other : value >= other,
+                  );
               return (
                 <tr
                   key={r.hash}
-                  onClick={() => onPinHash(v.label)}
                   className={cn(
-                    "cursor-pointer hover:bg-muted/50",
-                    isPinned && "bg-[color-mix(in_oklab,var(--primary)_8%,transparent)]",
+                    "hover:bg-muted/50",
+                    isWinner &&
+                      "bg-[color-mix(in_oklab,var(--success)_8%,transparent)]",
                   )}
-                  title={`Pin links to ${v.label} — ${r.name}`}
                 >
                   <td className="px-2 py-1.5 align-middle">
                     <div className="flex items-center gap-1.5">
@@ -753,14 +912,19 @@ function RunStatsTable({
                         className="h-1.5 w-1.5 rounded-sm shrink-0"
                         style={{ backgroundColor: runColors[r.hash] ?? "#888" }}
                       />
-                      <span className="text-foreground">{v.label}</span>
+                      <span className="text-foreground truncate">{r.name}</span>
                     </div>
                   </td>
-                  <td className="px-2 py-1.5 align-middle truncate max-w-[110px] text-muted-foreground">
+                  <td className="px-2 py-1.5 align-middle text-muted-foreground">
                     {shortHash(r.hash)}
                   </td>
-                  <td className="px-2 py-1.5 align-middle text-right text-tabular">
-                    {r.final_loss != null ? r.final_loss.toFixed(4) : "—"}
+                  <td
+                    className={cn(
+                      "px-2 py-1.5 align-middle text-right text-tabular",
+                      isWinner && "text-[var(--success)] font-medium",
+                    )}
+                  >
+                    {value != null ? value.toFixed(4) : "—"}
                   </td>
                   <td className="px-2 py-1.5 align-middle text-right text-tabular text-muted-foreground">
                     {formatDuration(r.duration ?? 0)}
@@ -887,6 +1051,7 @@ function VersionSelector({
           <ul className="max-h-[280px] overflow-y-auto scrollbar-thin">
             {ordered.map((v) => {
               const isSelected = v.label === selectedLabel && !pinnedLatest;
+              const runCount = v.runs.length;
               return (
                 <li key={v.label}>
                   <button
@@ -899,18 +1064,24 @@ function VersionSelector({
                       isSelected && "bg-[color-mix(in_oklab,var(--primary)_10%,transparent)]",
                     )}
                     role="menuitem"
-                    title={`${v.run.name} — ${formatTimestamp(v.run.creation_time)}`}
+                    title={`${v.label} — ${runCount} run${runCount === 1 ? "" : "s"} — ${formatTimestamp(v.createdAt)}`}
                   >
                     <span className="flex items-center gap-2 min-w-0">
                       <span className="text-foreground shrink-0">{v.label}</span>
                       <span className="text-[10px] text-muted-foreground truncate">
-                        {shortHash(v.run.hash)} · {v.run.name}
+                        {runCount} run{runCount === 1 ? "" : "s"}
+                        {v.runs.length > 0 && (
+                          <>
+                            {" · "}
+                            {v.runs.map((r) => r.name).join(", ")}
+                          </>
+                        )}
                       </span>
                     </span>
                     <span
                       className="text-[10px] text-muted-foreground text-tabular shrink-0"
                     >
-                      {formatRelative(v.run.creation_time)}
+                      {formatRelative(v.createdAt)}
                     </span>
                   </button>
                 </li>

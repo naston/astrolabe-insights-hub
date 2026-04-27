@@ -19,7 +19,14 @@ export interface Experiment {
   started_at: string | null;
   duration: number; // seconds
   outcome: ExperimentOutcome;
+  /** Total number of runs across every version (versions × runs-per-version). */
   run_count: number;
+  /**
+   * Number of versions of this experiment (each = one re-submit). Optional —
+   * older API responses may not include it; the dashboard falls back to
+   * counting versions from the runs payload when it's missing.
+   */
+  version_count?: number;
   // Optional, may be present in future API versions; falls back gracefully
   repo?: string | null;
   state_history?: { state: ExperimentState; at: string }[];
@@ -41,6 +48,14 @@ export interface Run {
   hash: string;
   name: string;
   experiment: string;
+  /**
+   * Which version of the experiment this run belongs to ("v1", "v2", …).
+   * One submit = one version = one or more runs (e.g. "BERT" + "LatentBERT"
+   * are two runs of the same version of an "architecture-comparison"
+   * experiment). Optional for backward compatibility — when missing, the
+   * dashboard treats the run as version "v1".
+   */
+  version?: string;
   creation_time: string;
   end_time: string | null;
   active: boolean;

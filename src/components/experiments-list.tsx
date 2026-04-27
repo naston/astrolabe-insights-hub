@@ -431,7 +431,10 @@ function ExperimentRow({
           {formatDuration(experiment.duration)}
         </span>
         <span className="text-right">
-          <VersionBadge count={experiment.run_count} />
+          <VersionBadge
+            versionCount={experiment.version_count ?? experiment.run_count}
+            runCount={experiment.run_count}
+          />
         </span>
         <span className="text-right">
           <OutcomeBadge outcome={experiment.outcome} />
@@ -450,25 +453,70 @@ function RunsPanel({ experimentName }: { experimentName: string }) {
     { intervalMs: POLL_MS },
   );
 
-  // We intentionally suppress the "loading…" word during background polls.
-  // The first paint shows a tiny skeleton hint instead, then content lands silently.
+  // Group runs by version, then show the LATEST version's runs in the
+  // expansion. Cross-version comparison happens on the detail page; the
+  // home expansion is for "what's in this latest submit?" — typically the
+  // 2-3 things being compared (e.g., BERT vs LatentBERT).
+  const groups = useMemo(() => {
+    if (!data) return null;
+    const byVersion = new Map<string, { label: string; runs: Run[]; createdAt: string }>();
+    for (const run of data) {
+      const label = run.version || "v1";
+      const entry = byVersion.get(label);
+      if (entry) {
+        entry.runs.push(run);
+        if (run.creation_time < entry.createdAt) entry.createdAt = run.creation_time;
+      } else {
+        byVersion.set(label, {
+          label,
+          runs: [run],
+          createdAt: run.creation_time,
+        });
+      }
+    }
+    return Array.from(byVersion.values()).sort(
+      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+    );
+  }, [data]);
+
+  const latest = groups && groups.length > 0 ? groups[groups.length - 1] : null;
+  const olderVersionCount = groups ? Math.max(0, groups.length - 1) : 0;
+
   return (
     <div className="border-t border-border bg-surface/50 px-3 py-2 animate-fade-in">
       {error && !data && (
         <div className="px-2 py-3 text-xs text-destructive">
-          Failed to load versions — {error.message}
+          Failed to load runs — {error.message}
         </div>
       )}
       {data && data.length === 0 && (
-        <div className="px-2 py-3 text-xs text-muted-foreground">No versions yet.</div>
+        <div className="px-2 py-3 text-xs text-muted-foreground">No runs yet.</div>
       )}
       {!data && !error && (
         <div className="px-2 py-3 text-xs text-muted-foreground/60 font-mono">·····</div>
       )}
-      {data && data.length > 0 && (
+      {latest && (
         <div className="rounded-md border border-border bg-card overflow-hidden">
-          <div className="grid grid-cols-[60px_80px_minmax(0,1fr)_120px_120px_100px_90px] gap-3 border-b border-border bg-surface px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-            <span>Version</span>
+          <div className="flex items-center justify-between border-b border-border bg-surface px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+            <span>
+              <span className="text-foreground font-mono">{latest.label}</span>
+              {" — "}
+              {latest.runs.length} run{latest.runs.length === 1 ? "" : "s"}
+              {" (latest version)"}
+            </span>
+            {olderVersionCount > 0 && (
+              <Link
+                to="/experiment"
+                search={{ name: experimentName, version: "latest" }}
+                className="font-mono text-muted-foreground hover:text-foreground"
+                onClick={(e) => e.stopPropagation()}
+              >
+                +{olderVersionCount} older version
+                {olderVersionCount === 1 ? "" : "s"} →
+              </Link>
+            )}
+          </div>
+          <div className="grid grid-cols-[80px_minmax(0,1fr)_120px_120px_100px_90px] gap-3 border-b border-border bg-surface/60 px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
             <span>Hash</span>
             <span>Run</span>
             <span>Created</span>
@@ -477,21 +525,14 @@ function RunsPanel({ experimentName }: { experimentName: string }) {
             <span className="text-right">State</span>
           </div>
           <ul className="divide-y divide-border">
-            {/* Render newest-first so v1 of N reads the same as the version selector */}
-            {[...data]
-              .sort(
-                (a, b) =>
-                  new Date(b.creation_time).getTime() -
-                  new Date(a.creation_time).getTime(),
-              )
-              .map((run, i, all) => (
-                <RunRow
-                  key={run.hash}
-                  run={run}
-                  experimentName={experimentName}
-                  versionLabel={`v${all.length - i}`}
-                />
-              ))}
+            {latest.runs.map((run) => (
+              <RunRow
+                key={run.hash}
+                run={run}
+                experimentName={experimentName}
+                versionLabel={latest.label}
+              />
+            ))}
           </ul>
         </div>
       )}
@@ -499,15 +540,29 @@ function RunsPanel({ experimentName }: { experimentName: string }) {
   );
 }
 
-function VersionBadge({ count }: { count: number }) {
-  // Cardinality cue — make it obvious that one row = N submits.
+function VersionBadge({
+  versionCount,
+  runCount,
+}: {
+  versionCount: number;
+  runCount: number;
+}) {
+  // Cardinality cue — make it obvious that one row = N versions of an
+  // experiment, and each version typically holds multiple runs (e.g.
+  // BERT + LatentBERT). Both numbers are useful at a scan: ×N v says
+  // "this has been re-run N times", "M runs" says "M training jobs total."
   return (
     <span
       className="inline-flex items-center gap-1 rounded-md border border-border bg-surface px-1.5 py-0.5 text-[10px] font-mono text-muted-foreground"
-      title={`${count} submitted version${count === 1 ? "" : "s"}`}
+      title={`${versionCount} version${versionCount === 1 ? "" : "s"} · ${runCount} run${runCount === 1 ? "" : "s"} total`}
     >
-      <span className="text-tabular text-foreground font-medium">×{count}</span>
+      <span className="text-tabular text-foreground font-medium">
+        ×{versionCount}
+      </span>
       <span className="opacity-60">v</span>
+      <span className="opacity-40">·</span>
+      <span className="text-tabular text-muted-foreground">{runCount}</span>
+      <span className="opacity-60">r</span>
     </span>
   );
 }
@@ -522,16 +577,16 @@ function RunRow({
   versionLabel: string;
 }) {
   return (
-    <li className="grid grid-cols-[60px_80px_minmax(0,1fr)_120px_120px_100px_90px] gap-3 items-center px-3 py-1.5 text-xs hover:bg-muted/50">
+    <li className="grid grid-cols-[80px_minmax(0,1fr)_120px_120px_100px_90px] gap-3 items-center px-3 py-1.5 text-xs hover:bg-muted/50">
       <Link
         to="/experiment"
         search={{ name: experimentName, version: versionLabel }}
-        className="font-mono text-tabular text-foreground hover:text-primary"
+        className="font-mono text-muted-foreground hover:text-primary"
         onClick={(e) => e.stopPropagation()}
+        title={`Open ${versionLabel} of this experiment`}
       >
-        {versionLabel}
+        {shortHash(run.hash)}
       </Link>
-      <span className="font-mono text-muted-foreground">{shortHash(run.hash)}</span>
       <span className="truncate font-medium">{run.name}</span>
       <span
         className="font-mono text-tabular text-muted-foreground"
