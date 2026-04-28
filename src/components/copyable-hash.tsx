@@ -43,14 +43,30 @@ export function CopyableHash({ hash, length = 7, className }: CopyableHashProps)
     }
   };
 
+  // Render as a span (not a button) so this can nest inside other
+  // interactive elements — the comparison panel wraps each run in a
+  // <button> that toggles visibility, and a button-inside-button is
+  // invalid HTML that React 19 throws on at render time. The span
+  // keeps the click handler and adds role/tabIndex/key handlers so
+  // it stays keyboard-accessible.
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.stopPropagation();
+      e.preventDefault();
+      onCopy(e as unknown as React.MouseEvent);
+    }
+  };
+
   return (
-    <button
-      type="button"
+    <span
+      role="button"
+      tabIndex={0}
       onClick={onCopy}
+      onKeyDown={onKey}
       title={copied ? "Copied!" : `Click to copy: ${hash}`}
       aria-label={copied ? "Copied" : "Copy full hash"}
       className={cn(
-        "inline-flex items-center gap-1 cursor-pointer",
+        "inline-flex items-center gap-1 cursor-pointer select-none",
         "hover:text-foreground transition-colors",
         copied && "text-success",
         className,
@@ -60,8 +76,8 @@ export function CopyableHash({ hash, length = 7, className }: CopyableHashProps)
       {copied ? (
         <Check className="h-3 w-3" aria-hidden />
       ) : (
-        <Copy className="h-3 w-3 opacity-40 group-hover:opacity-100" aria-hidden />
+        <Copy className="h-3 w-3 opacity-40" aria-hidden />
       )}
-    </button>
+    </span>
   );
 }
