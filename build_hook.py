@@ -34,22 +34,39 @@ class StaticBundleBuildHook(BuildHookInterface):
                 "`python -m build` so the wheel has frontend assets to ship."
             )
 
-        staging = root / "astrolabe_dashboard" / "static"
-        # Wipe any prior staging so a stale build doesn't leak into a
-        # new wheel. shutil.rmtree tolerates missing paths via missing_ok.
-        if staging.exists():
-            shutil.rmtree(staging)
-        shutil.copytree(dist, staging)
+        # Static (from bun's vite build).
+        static_staging = root / "astrolabe_dashboard" / "static"
+        if static_staging.exists():
+            shutil.rmtree(static_staging)
+        shutil.copytree(dist, static_staging)
+
+        # Config (colors.json from the Go server). Bundling it into
+        # the wheel means a single artifact ships everything the
+        # dashboard binary needs — no separate config tarball, no
+        # missing-file warnings on first start.
+        config_src = root / "server" / "config"
+        if not config_src.exists():
+            raise FileNotFoundError(
+                f"server/config/ not found at {config_src}. The dashboard "
+                "wheel ships the colors.json config alongside the static "
+                "bundle so the Go binary has everything in one artifact."
+            )
+        config_staging = root / "astrolabe_dashboard" / "config"
+        if config_staging.exists():
+            shutil.rmtree(config_staging)
+        shutil.copytree(config_src, config_staging)
 
         # Hatchling's wheel target requires every package to have an
         # __init__.py. Drop a minimal one so the package imports
-        # cleanly; the actual content is the static dir.
+        # cleanly; the actual content is the static + config dirs.
         init = root / "astrolabe_dashboard" / "__init__.py"
         if not init.exists():
             init.write_text(
                 '"""Astrolabe dashboard frontend bundle.\n\n'
                 "The package contains no Python — `astrolabe_dashboard.static` "
-                "holds the built React app served by the Go dashboard binary.\n"
+                "holds the built React app served by the Go dashboard binary, "
+                "and `astrolabe_dashboard.config` holds the colors.json the "
+                "binary reads at startup.\n"
                 '"""\n'
             )
 
@@ -58,10 +75,9 @@ class StaticBundleBuildHook(BuildHookInterface):
         # against an empty astrolabe_dashboard/ tree (we just created
         # it). force_include puts the freshly-staged files into the
         # wheel directly, bypassing the include resolution that's
-        # already happened. Pair this with NO include glob in
-        # pyproject.toml — the glob produced duplicate-name warnings
-        # when both mechanisms picked up the same files.
+        # already happened.
         build_data["force_include"] = {
-            str(staging): "astrolabe_dashboard/static",
+            str(static_staging): "astrolabe_dashboard/static",
+            str(config_staging): "astrolabe_dashboard/config",
             str(init): "astrolabe_dashboard/__init__.py",
         }
