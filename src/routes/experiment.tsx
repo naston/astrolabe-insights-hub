@@ -196,13 +196,6 @@ function ExperimentBody({
   // to /dev/null and the user just got a smaller comparison set than
   // they asked for.
   const [unresolvedIncludes, setUnresolvedIncludes] = useState<string[]>([]);
-  // Same idea for run-name-multi includes, where the same run.name
-  // appears across multiple experiments and the include pulled them
-  // all — wider scope than the user may have expected. Surface the
-  // count + names so they can refine to a hash if they meant just one.
-  const [multiScopeIncludes, setMultiScopeIncludes] = useState<
-    { name: string; runCount: number }[]
-  >([]);
 
   // Fetch and auto-populate comparison runs from the experiment's
   // --include list. Reruns when the experiment changes (deep links from
@@ -218,14 +211,10 @@ function ExperimentBody({
         if (cancelled) return;
         const seedHashes: ComparisonRunPick[] = [];
         const unresolved: string[] = [];
-        const multiScope: { name: string; runCount: number }[] = [];
         for (const group of data.includes ?? []) {
           if (group.type === "unknown") {
             unresolved.push(group.name);
             continue;
-          }
-          if (group.type === "run-name-multi") {
-            multiScope.push({ name: group.name, runCount: group.runs.length });
           }
           for (const hash of group.runs) {
             if (hash && !removedFromIncludes.has(hash)) {
@@ -245,7 +234,6 @@ function ExperimentBody({
           return [...seedHashes, ...userOnly];
         });
         setUnresolvedIncludes(unresolved);
-        setMultiScopeIncludes(multiScope);
       } catch {
         /* keep prior state on error — quiet polling */
       }
@@ -500,44 +488,28 @@ function ExperimentBody({
           />
         )}
 
-        {/* Include-resolution feedback. v1.4.x surfaces what used to
-            silently disappear: --include arguments that didn't match
-            anything ("unknown") or matched a run name across multiple
-            experiments ("run-name-multi" — wider scope than expected). */}
-        {(unresolvedIncludes.length > 0 || multiScopeIncludes.length > 0) && (
+        {/* Unresolved-include banner. v1.4.x surfaces include strings
+            that didn't match any hash, experiment, or run name —
+            previously those silently disappeared from the comparison
+            set, leaving the user wondering why their compare list
+            came back short. Run-name matches now resolve to a single
+            latest run, so the wider-scope warning has gone away. */}
+        {unresolvedIncludes.length > 0 && (
           <div className="rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-xs">
-            {unresolvedIncludes.length > 0 && (
-              <div className="text-warning-foreground">
-                <span className="font-medium">Unresolved include{unresolvedIncludes.length > 1 ? "s" : ""}:</span>{" "}
-                {unresolvedIncludes.map((n, i) => (
-                  <span key={n}>
-                    {i > 0 && ", "}
-                    <code className="rounded bg-background/60 px-1 py-0.5 line-through">
-                      {n}
-                    </code>
-                  </span>
-                ))}
-                <span className="ml-1 text-muted-foreground">
-                  — no Aim experiment, run, or hash matched.
+            <div className="text-warning-foreground">
+              <span className="font-medium">Unresolved include{unresolvedIncludes.length > 1 ? "s" : ""}:</span>{" "}
+              {unresolvedIncludes.map((n, i) => (
+                <span key={n}>
+                  {i > 0 && ", "}
+                  <code className="rounded bg-background/60 px-1 py-0.5 line-through">
+                    {n}
+                  </code>
                 </span>
-              </div>
-            )}
-            {multiScopeIncludes.length > 0 && (
-              <div className="text-warning-foreground">
-                <span className="font-medium">
-                  {multiScopeIncludes.length === 1 ? "Multi-scope include:" : "Multi-scope includes:"}
-                </span>{" "}
-                {multiScopeIncludes.map((m, i) => (
-                  <span key={m.name}>
-                    {i > 0 && ", "}
-                    <code className="rounded bg-background/60 px-1 py-0.5">
-                      {m.name}
-                    </code>
-                    <span className="text-muted-foreground"> ({m.runCount} runs across multiple experiments)</span>
-                  </span>
-                ))}
-              </div>
-            )}
+              ))}
+              <span className="ml-1 text-muted-foreground">
+                — no Aim experiment, run, or hash matched.
+              </span>
+            </div>
           </div>
         )}
 
