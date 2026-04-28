@@ -78,10 +78,28 @@ export interface Run {
   submitted_by?: string;
 }
 
+/**
+ * Resolution shape for a single --include argument, returned from
+ * /api/experiments/{name}/includes. The Go API resolves each include
+ * against four shapes: hash → experiment name → run name → unknown.
+ *
+ * - "hash":       single Aim run hash matched directly
+ * - "experiment": Aim experiment name matched (multi-run)
+ * - "run-name":   Aim run.name matched somewhere in the corpus;
+ *                 resolves to the SINGLE most recent matching run
+ *                 (researchers wanting wider scope use the experiment
+ *                 name or a specific hash)
+ * - "unknown":    no match; runs is empty. Frontend renders the
+ *                 include as a struck-out chip rather than silently
+ *                 dropping it
+ */
+export type IncludeType = "hash" | "experiment" | "run-name" | "unknown";
+
 export interface IncludeGroup {
   name: string;
-  type: string;
-  runs: Run[];
+  type: IncludeType;
+  /** Aim run hashes — empty for type="unknown". */
+  runs: string[];
 }
 
 export interface IncludesResponse {
