@@ -31,25 +31,27 @@ Source = "https://github.com/naston/astrolabe-insights-hub"
 
 # The wheel contains the contents of dist/ verbatim, exposed under the
 # astrolabe_dashboard import name. astrolabe's install flow imports
-# `astrolabe_dashboard` to find the static path:
+# `astrolabe_dashboard` to find the static path.
 #
-#   from importlib.resources import files
-#   static_dir = files("astrolabe_dashboard") / "static"
+# How the wheel gets built:
+#   1. CI runs `bun run build` → dist/ contains the React static.
+#   2. CI runs `python -m build --wheel`.
+#   3. Hatchling invokes our custom hook (build_hook.py) which copies
+#      dist/ → astrolabe_dashboard/static/ in the build dir, then
+#      registers those files as "force_include" entries.
+#   4. Hatchling assembles the wheel, picking up the force-included
+#      files even though they aren't in the original source tree.
 #
-# This works for both pip-installed wheels and editable installs.
-[tool.hatch.build]
-# Treat the dashboard wheel as a pure-data wheel — no Python source,
-# the package is just `astrolabe_dashboard/static/<bundle>`.
-include = ["astrolabe_dashboard/**"]
-
-# Hatchling's wheel target needs an explicit "what's the package" hint
-# when there's no .py file. Point it at the namespace dir we
-# materialize at build time (see [tool.hatch.build.hooks.custom]).
+# We *don't* set [tool.hatch.build] include because that glob is
+# evaluated against the source tree before the hook runs — at which
+# point astrolabe_dashboard/ is empty. Relying solely on force_include
+# avoids the chicken-and-egg.
 [tool.hatch.build.targets.wheel]
+# Force-include is what populates the wheel; this just declares the
+# package directory hatchling should expect to ship.
 packages = ["astrolabe_dashboard"]
+# Allow build with no Python source — the wheel is data-only.
+bypass-selection = true
 
-# Custom build hook copies dist/ into astrolabe_dashboard/static/
-# right before the wheel is assembled, so the source tree doesn't have
-# to keep a duplicate of the build output.
 [tool.hatch.build.hooks.custom]
 path = "build_hook.py"

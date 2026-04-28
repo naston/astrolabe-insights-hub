@@ -53,7 +53,15 @@ class StaticBundleBuildHook(BuildHookInterface):
                 '"""\n'
             )
 
-        # No force_include needed — the staging dir lives under the
-        # project root and the [tool.hatch.build] include glob picks it
-        # up. Adding force_include here would double-add every file
-        # and produce "Duplicate name" warnings during wheel zipping.
+        # Hatchling's source tree is set up before this hook fires, so
+        # the include-glob in pyproject.toml has already been resolved
+        # against an empty astrolabe_dashboard/ tree (we just created
+        # it). force_include puts the freshly-staged files into the
+        # wheel directly, bypassing the include resolution that's
+        # already happened. Pair this with NO include glob in
+        # pyproject.toml — the glob produced duplicate-name warnings
+        # when both mechanisms picked up the same files.
+        build_data["force_include"] = {
+            str(staging): "astrolabe_dashboard/static",
+            str(init): "astrolabe_dashboard/__init__.py",
+        }
