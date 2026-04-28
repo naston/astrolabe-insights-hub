@@ -676,6 +676,14 @@ function ExperimentRow({
           <span className="truncate text-sm font-medium hover:text-primary transition-colors">
             {experiment.name}
           </span>
+          {experiment.submitted_by && (
+            <span
+              className="text-xs text-muted-foreground font-mono shrink-0"
+              title={`Submitted by ${experiment.submitted_by}`}
+            >
+              · {experiment.submitted_by}
+            </span>
+          )}
           {live && (
             <span className="ml-1 rounded bg-[color-mix(in_oklab,var(--info)_15%,transparent)] px-1 py-0.5 text-[9px] font-mono text-[var(--info)] uppercase tracking-wider">
               live

@@ -422,6 +422,14 @@ function ExperimentBody({
               <h1 className="text-xl font-semibold tracking-tight truncate">
                 {experimentName}
               </h1>
+              {experiment?.submitted_by && (
+                <span
+                  className="text-xs text-muted-foreground font-mono"
+                  title={`Submitted by ${experiment.submitted_by}`}
+                >
+                  by {experiment.submitted_by}
+                </span>
+              )}
               {experiment && <StateBadge state={experiment.state} />}
               {live && (
                 <span className="rounded bg-[color-mix(in_oklab,var(--info)_15%,transparent)] px-1.5 py-0.5 text-[10px] font-mono text-[var(--info)] uppercase tracking-wider">
