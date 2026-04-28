@@ -53,6 +53,10 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.26.x"
+          # No external Go deps — server/ has no go.sum. Disable
+          # cache so setup-go doesn't print a "go.sum not found"
+          # warning every run.
+          cache: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
