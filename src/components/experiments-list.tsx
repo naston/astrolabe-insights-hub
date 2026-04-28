@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import {
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   Cpu,
   Keyboard,
   RefreshCw,
@@ -22,8 +23,6 @@ import {
 } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
-import { Button } from "@/components/ui/button";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { FilterDropdown } from "@/components/filter-dropdown";
 import { StatusDot } from "@/components/status-dot";
 import { OutcomeBadge, StateBadge } from "@/components/state-badge";
@@ -57,14 +56,28 @@ function statusBucket(state: ExperimentState): StatusBucket {
   return "running";
 }
 
-type SortKey = "recent" | "oldest" | "name" | "runs" | "status";
-const SORT_OPTIONS: { value: SortKey; label: string }[] = [
-  { value: "recent", label: "Most recent" },
-  { value: "oldest", label: "Oldest" },
-  { value: "name", label: "Name (A–Z)" },
-  { value: "runs", label: "Run count" },
-  { value: "status", label: "Status (active first)" },
-];
+/**
+ * Sort key — the column being sorted by, with explicit direction.
+ *
+ * Three sortable columns map to the existing table headers:
+ *
+ *  - "name-asc"     / "name-desc"      — Experiment column (A–Z / Z–A)
+ *  - "state-asc"    / "state-desc"     — State column (active-first / failed-first)
+ *  - "started-asc"  / "started-desc"   — Started column (oldest-first / recent-first)
+ *
+ * The default (no key in the URL) is "started-desc" semantically, but
+ * we don't render a caret indicator on the Started header in that
+ * case — keeping the home page visually clean when the user hasn't
+ * picked a sort.
+ *
+ * Backward-compat for v0.4.0-shaped URLs (?sort=recent|oldest|name|status):
+ * decoded into the new shape via legacySort below. Old bookmarks
+ * keep working; their next interaction with the column headers
+ * produces the new URL values.
+ */
+type SortColumn = "name" | "state" | "started";
+type SortDirection = "asc" | "desc";
+type SortKey = `${SortColumn}-${SortDirection}`;
 
 const STATUS_RANK: Record<StatusBucket, number> = {
   running: 0,
@@ -72,6 +85,52 @@ const STATUS_RANK: Record<StatusBucket, number> = {
   completed: 2,
   failed: 3,
 };
+
+/** Map ?sort= values (including the v0.4.0 names) to the new SortKey. */
+function decodeSortKey(raw: string | undefined): SortKey | null {
+  if (!raw) return null;
+  // v0.4.0 shorthand → v0.4.1+ explicit shape.
+  const legacy: Record<string, SortKey> = {
+    recent: "started-desc",
+    oldest: "started-asc",
+    name: "name-asc",
+    status: "state-asc",
+  };
+  if (raw in legacy) return legacy[raw];
+  // New shape: validate against the 6 known values.
+  const valid: SortKey[] = [
+    "name-asc", "name-desc",
+    "state-asc", "state-desc",
+    "started-asc", "started-desc",
+  ];
+  return (valid as string[]).includes(raw) ? (raw as SortKey) : null;
+}
+
+/**
+ * Compute what a click on `column` should produce.
+ *
+ * Cycle: unsorted → asc → desc → unsorted (clears the sort).
+ *
+ * Date-shaped columns (started) start with desc so the first click
+ * shows "most recent first" — matches GitHub / general-purpose
+ * conventions for date sorts. Other columns start asc.
+ *
+ * Returns the next SortKey, or null when the click should clear.
+ */
+function nextSortKey(column: SortColumn, current: SortKey | null): SortKey | null {
+  const initial: SortDirection = column === "started" ? "desc" : "asc";
+  if (!current || !current.startsWith(`${column}-`)) {
+    return `${column}-${initial}` as SortKey;
+  }
+  // Already sorting by this column — flip or clear.
+  const flipped: SortDirection = current.endsWith("-asc") ? "desc" : "asc";
+  if (flipped === initial) {
+    // We've completed the cycle (asc → desc → asc, or desc → asc → desc).
+    // Clear back to default.
+    return null;
+  }
+  return `${column}-${flipped}` as SortKey;
+}
 
 /** Decode a comma-joined search-param value into a list. */
 function decodeList(raw: string | undefined): string[] {
@@ -113,17 +172,14 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
   const selectedStatus = decodeList(search.status);
   const selectedSubmitter = decodeList(search.submitter);
   const selectedRepo = decodeList(search.repo);
-  const sortKey: SortKey = (
-    SORT_OPTIONS.some((o) => o.value === search.sort)
-      ? (search.sort as SortKey)
-      : "recent"
-  );
+  // sortKey is null when no explicit sort is applied (default = started-desc, no caret).
+  const sortKey: SortKey | null = decodeSortKey(search.sort);
 
   const updateSearch = (next: Partial<{
     status: string[];
     submitter: string[];
     repo: string[];
-    sort: SortKey;
+    sort: SortKey | null;
   }>) => {
     navigate({
       search: (prev) => ({
@@ -131,11 +187,16 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
         ...(next.status !== undefined && { status: encodeList(next.status) }),
         ...(next.submitter !== undefined && { submitter: encodeList(next.submitter) }),
         ...(next.repo !== undefined && { repo: encodeList(next.repo) }),
-        ...(next.sort !== undefined && { sort: next.sort === "recent" ? undefined : next.sort }),
+        // null → strip from URL; non-null → set verbatim.
+        ...(next.sort !== undefined && { sort: next.sort ?? undefined }),
       }),
       replace: true,
     });
   };
+
+  /** Click handler for sortable column headers. */
+  const onColumnClick = (column: SortColumn) =>
+    updateSearch({ sort: nextSortKey(column, sortKey) });
 
   const resetFilters = () =>
     navigate({ search: () => ({}), replace: true });
@@ -209,22 +270,20 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
 
   const sorted = useMemo(() => {
     const list = [...filtered];
-    switch (sortKey) {
-      case "oldest":
-        list.sort((a, b) => (a.started_at ?? "").localeCompare(b.started_at ?? ""));
-        break;
-      case "name":
-        list.sort((a, b) => a.name.localeCompare(b.name));
-        break;
-      case "runs":
-        list.sort((a, b) => b.run_count - a.run_count);
-        break;
-      case "status":
-        list.sort((a, b) => STATUS_RANK[statusBucket(a.state)] - STATUS_RANK[statusBucket(b.state)]);
-        break;
-      case "recent":
-      default:
-        list.sort((a, b) => (b.started_at ?? "").localeCompare(a.started_at ?? ""));
+    // Effective sort: explicit URL key, else the default ("started-desc").
+    const effective: SortKey = sortKey ?? "started-desc";
+    const direction: SortDirection = effective.endsWith("-desc") ? "desc" : "asc";
+    const flip = direction === "desc" ? -1 : 1;
+
+    if (effective.startsWith("name-")) {
+      list.sort((a, b) => a.name.localeCompare(b.name) * flip);
+    } else if (effective.startsWith("state-")) {
+      list.sort((a, b) =>
+        (STATUS_RANK[statusBucket(a.state)] - STATUS_RANK[statusBucket(b.state)]) * flip,
+      );
+    } else {
+      // started-asc / started-desc (and the default).
+      list.sort((a, b) => (a.started_at ?? "").localeCompare(b.started_at ?? "") * flip);
     }
     return list;
   }, [filtered, sortKey]);
@@ -360,13 +419,7 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
           onChange={(next) => updateSearch({ repo: next })}
         />
 
-        {/* Sort dropdown — single-select. Reuses FilterDropdown's
-            popover trigger but with single-pick semantics handled by
-            wrapping a native <select>. Cleaner UX would be a separate
-            component; FilterDropdown's checkbox interaction works fine
-            for multi-select but reads weirdly for single-select. */}
-        <SortDropdown value={sortKey} onChange={(v) => updateSearch({ sort: v })} />
-
+        {/* Sort lives on the table headers — see SortableHeader below. */}
         {anyFilterActive && (
           <button
             type="button"
@@ -408,10 +461,25 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
       <div className="rounded-lg border border-border bg-card overflow-hidden">
         <div className="grid grid-cols-[28px_minmax(260px,1fr)_140px_140px_120px_110px_110px_90px] gap-3 border-b border-border bg-surface px-3 py-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
           <span></span>
-          <span>Experiment</span>
-          <span>State</span>
+          <SortableHeader
+            label="Experiment"
+            column="name"
+            currentSort={sortKey}
+            onClick={() => onColumnClick("name")}
+          />
+          <SortableHeader
+            label="State"
+            column="state"
+            currentSort={sortKey}
+            onClick={() => onColumnClick("state")}
+          />
           <span>GPU</span>
-          <span>Started</span>
+          <SortableHeader
+            label="Started"
+            column="started"
+            currentSort={sortKey}
+            onClick={() => onColumnClick("started")}
+          />
           <span>Duration</span>
           <span className="text-right">Versions</span>
           <span className="text-right">Outcome</span>
@@ -502,52 +570,50 @@ function KpiCard({ label, value, accent, pulse }: KpiProps) {
 }
 
 /**
- * Single-select sort dropdown next to the filter shelf.
+ * A clickable sortable column header with caret indicator.
  *
- * Uses the same Popover trigger shape as FilterDropdown for visual
- * consistency, but with single-pick semantics — clicking an option
- * applies it and closes the popover. Default sort ("recent") shows
- * just "Sort" on the trigger; everything else shows "Sort: <label>".
+ * Three sortable columns on the home-page table — Experiment / State
+ * / Started — use this. Click cycles through asc → desc → cleared
+ * (the URL ``sort`` param is removed, list returns to the default
+ * "started-desc" without an indicator).
+ *
+ * The caret renders only when this column is the active sort. When
+ * inactive, the header looks like the non-sortable headers; on
+ * hover, a subtle foreground change signals it's clickable.
  */
-function SortDropdown({
-  value,
-  onChange,
+function SortableHeader({
+  label,
+  column,
+  currentSort,
+  onClick,
 }: {
-  value: SortKey;
-  onChange: (next: SortKey) => void;
+  label: string;
+  column: SortColumn;
+  currentSort: SortKey | null;
+  onClick: () => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const current = SORT_OPTIONS.find((o) => o.value === value);
-  const triggerText =
-    value === "recent" ? "Sort" : `Sort: ${current?.label ?? value}`;
-
+  const isActive = currentSort?.startsWith(`${column}-`);
+  const direction: SortDirection | null = isActive
+    ? (currentSort!.endsWith("-asc") ? "asc" : "desc")
+    : null;
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <Button variant="outline" size="sm" className="ml-auto">
-          {triggerText}
-          <ChevronDown className="ml-2 h-3 w-3" />
-        </Button>
-      </PopoverTrigger>
-      <PopoverContent align="end" className="w-44 p-1">
-        {SORT_OPTIONS.map((opt) => (
-          <button
-            key={opt.value}
-            type="button"
-            onClick={() => {
-              onChange(opt.value);
-              setOpen(false);
-            }}
-            className={cn(
-              "w-full rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent",
-              opt.value === value && "bg-accent text-accent-foreground",
-            )}
-          >
-            {opt.label}
-          </button>
-        ))}
-      </PopoverContent>
-    </Popover>
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "flex items-center gap-1 text-left transition-colors hover:text-foreground",
+        isActive && "text-foreground",
+      )}
+      aria-sort={
+        direction === "asc" ? "ascending"
+        : direction === "desc" ? "descending"
+        : "none"
+      }
+    >
+      <span>{label}</span>
+      {direction === "asc" && <ChevronUp className="h-3 w-3" />}
+      {direction === "desc" && <ChevronDown className="h-3 w-3" />}
+    </button>
   );
 }
 
