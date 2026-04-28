@@ -3,7 +3,8 @@ import { Search, X } from "lucide-react";
 import { api } from "@/lib/api";
 import type { Experiment, Run } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { formatDuration, formatRelative, shortHash } from "@/lib/format";
+import { formatDuration, formatRelative } from "@/lib/format";
+import { CopyableHash } from "@/components/copyable-hash";
 
 export interface ComparisonRunPick {
   hash: string;
@@ -176,9 +177,10 @@ export function ComparisonModal({
                     >
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 text-sm">
-                          <span className="font-mono text-[11px] text-muted-foreground">
-                            {shortHash(r.hash)}
-                          </span>
+                          <CopyableHash
+                            hash={r.hash}
+                            className="font-mono text-[11px] text-muted-foreground"
+                          />
                           <span className="truncate font-medium">{r.name}</span>
                           {r.active && (
                             <span className="rounded bg-[color-mix(in_oklab,var(--info)_15%,transparent)] px-1 py-0.5 text-[9px] font-mono uppercase text-[var(--info)]">
