@@ -1,0 +1,55 @@
+# Python packaging for the dashboard's static bundle.
+#
+# This is a stub package — the dashboard is a Go binary serving a
+# React frontend. We package the *static* (the result of `bun run
+# build`) as a Python wheel so astrolabe can consume it via the
+# `astrolabe admin dashboard install` flow without having to know about
+# bun/npm. The wheel ships zero Python code; just data.
+#
+# The Go binary ships separately as a per-platform tarball attached to
+# the same GitHub release.
+#
+# Build (locally or in CI):
+#   bun run build         # produces dist/
+#   python -m build .     # produces dist-py/astrolabe_dashboard-VERSION-py3-none-any.whl
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "astrolabe-dashboard"
+version = "0.4.0"
+description = "Static frontend bundle for the astrolabe dashboard."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Nathan Paull" }]
+
+[project.urls]
+Source = "https://github.com/naston/astrolabe-insights-hub"
+
+# The wheel contains the contents of dist/ verbatim, exposed under the
+# astrolabe_dashboard import name. astrolabe's install flow imports
+# `astrolabe_dashboard` to find the static path:
+#
+#   from importlib.resources import files
+#   static_dir = files("astrolabe_dashboard") / "static"
+#
+# This works for both pip-installed wheels and editable installs.
+[tool.hatch.build]
+# Treat the dashboard wheel as a pure-data wheel — no Python source,
+# the package is just `astrolabe_dashboard/static/<bundle>`.
+include = ["astrolabe_dashboard/**"]
+
+# Hatchling's wheel target needs an explicit "what's the package" hint
+# when there's no .py file. Point it at the namespace dir we
+# materialize at build time (see [tool.hatch.build.hooks.custom]).
+[tool.hatch.build.targets.wheel]
+packages = ["astrolabe_dashboard"]
+
+# Custom build hook copies dist/ into astrolabe_dashboard/static/
+# right before the wheel is assembled, so the source tree doesn't have
+# to keep a duplicate of the build output.
+[tool.hatch.build.hooks.custom]
+path = "build_hook.py"
