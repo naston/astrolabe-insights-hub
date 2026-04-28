@@ -5,6 +5,55 @@ import { shortHash } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 /**
+ * Copy ``text`` to clipboard, with a fallback for insecure origins.
+ *
+ * Browsers gate ``navigator.clipboard.writeText`` to HTTPS / localhost
+ * — on bare HTTP (the typical http://lake1:43801 NUC URL) it throws
+ * a NotAllowedError. This wrapper tries the modern API first, falls
+ * back to a hidden textarea + ``document.execCommand("copy")`` which
+ * works on every origin including plain HTTP.
+ *
+ * Returns true on success, false when both paths fail (e.g. the
+ * browser doesn't support either, or the user denied permission).
+ */
+async function copyToClipboard(text: string): Promise<boolean> {
+  // Modern path: works on HTTPS or localhost. NUC dashboards behind
+  // bare HTTP raise a SecurityError here; we catch and try the
+  // execCommand path.
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      /* fall through to execCommand */
+    }
+  }
+
+  // Legacy fallback. document.execCommand("copy") is deprecated but
+  // universally implemented and crucially works on http:// origins
+  // where the modern API is blocked. The textarea has to be in the
+  // document and selected; visually-hidden styles keep it
+  // off-screen.
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "0";
+    ta.style.left = "0";
+    ta.style.opacity = "0";
+    ta.style.pointerEvents = "none";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Renders a truncated hash that copies the full value to clipboard
  * when clicked.
  *
@@ -32,14 +81,9 @@ export function CopyableHash({ hash, length = 7, className }: CopyableHashProps)
     // Stop propagation so a click inside a row doesn't also navigate.
     e.stopPropagation();
     e.preventDefault();
-    try {
-      await navigator.clipboard.writeText(hash);
+    if (await copyToClipboard(hash)) {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // navigator.clipboard requires HTTPS or localhost — silently fail
-      // on http://lake1.local rather than throw a console error. The
-      // operator can fall back to selecting the visible text manually.
     }
   };
 
