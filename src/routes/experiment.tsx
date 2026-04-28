@@ -773,6 +773,7 @@ function ExperimentBody({
               runs={selectedVersion?.runs ?? []}
               runColors={runColors}
               availableMetrics={metricNames}
+              showSubmitterLines={showSubmitterLines}
             />
           </aside>
         </div>
@@ -857,11 +858,13 @@ function RunStatsTable({
   runs,
   runColors,
   availableMetrics,
+  showSubmitterLines,
 }: {
   versionLabel: string | undefined;
   runs: Run[];
   runColors: Record<string, string>;
   availableMetrics: string[];
+  showSubmitterLines: boolean;
 }) {
   // Default to train/loss when present, otherwise the first available metric.
   const defaultMetric = useMemo(() => {
