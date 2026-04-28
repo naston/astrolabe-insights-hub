@@ -17,8 +17,8 @@ import {
   formatRelative,
   formatTimestamp,
   isActiveState,
-  shortHash,
 } from "@/lib/format";
+import { CopyableHash } from "@/components/copyable-hash";
 import { cn } from "@/lib/utils";
 
 import { AppShell } from "@/components/app-shell";
@@ -320,6 +320,18 @@ function ExperimentBody({
     const q = runFilter.trim().toLowerCase();
     return allRuns.filter((r) => (q ? r.name.toLowerCase().includes(q) : true));
   }, [allRuns, runFilter]);
+
+  // "by alice" line on each run — only renders when the visible runs
+  // span more than one distinct submitter. Single-user contexts (the
+  // common case) get no extra visual weight; multi-user contexts
+  // (comparison runs from other people) make the identity explicit.
+  const showSubmitterLines = useMemo(() => {
+    const submitters = new Set<string>();
+    for (const r of allRuns) {
+      if (r.submitted_by) submitters.add(r.submitted_by);
+    }
+    return submitters.size > 1;
+  }, [allRuns]);
 
   // Build the chart-run specs (visible + active flag + color).
   const chartRuns: ChartRunSpec[] = useMemo(() => {
@@ -650,9 +662,10 @@ function ExperimentBody({
                                 {meta.version}
                               </span>
                             )}
-                            <span className="font-mono text-[10px] text-muted-foreground shrink-0">
-                              {shortHash(r.hash)}
-                            </span>
+                            <CopyableHash
+                              hash={r.hash}
+                              className="font-mono text-[10px] text-muted-foreground shrink-0"
+                            />
                             <span className="truncate text-xs">{r.name}</span>
                             {meta?.active && (
                               <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--info)] pulse-dot shrink-0" />
@@ -661,6 +674,14 @@ function ExperimentBody({
                           {isComparison && (
                             <div className="text-[10px] text-muted-foreground font-mono truncate">
                               {r.experiment}
+                              {showSubmitterLines && r.submitted_by && (
+                                <span> · by {r.submitted_by}</span>
+                              )}
+                            </div>
+                          )}
+                          {!isComparison && showSubmitterLines && r.submitted_by && (
+                            <div className="text-[10px] text-muted-foreground font-mono truncate">
+                              by {r.submitted_by}
                             </div>
                           )}
                         </div>
@@ -1013,10 +1034,15 @@ function RunStatsTable({
                         style={{ backgroundColor: runColors[r.hash] ?? "#888" }}
                       />
                       <span className="text-foreground truncate">{r.name}</span>
+                      {showSubmitterLines && r.submitted_by && (
+                        <span className="text-[10px] text-muted-foreground shrink-0">
+                          by {r.submitted_by}
+                        </span>
+                      )}
                     </div>
                   </td>
                   <td className="px-2 py-1.5 align-middle text-muted-foreground">
-                    {shortHash(r.hash)}
+                    <CopyableHash hash={r.hash} />
                   </td>
                   <td
                     className={cn(
