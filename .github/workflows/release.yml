@@ -1,0 +1,129 @@
+# Build + publish dashboard release artifacts on tag push.
+#
+# Triggered by `vX.Y.Z` tags. Produces three artifacts attached to the
+# GitHub release:
+#
+#   1. astrolabe_dashboard-X.Y.Z-py3-none-any.whl  (Python wheel — static bundle)
+#   2. astrolabe-dashboard-X.Y.Z-linux-amd64.tar.gz (Go binary)
+#   3. SHA256SUMS                                   (sums for the above)
+#
+# `astrolabe admin dashboard install` (in the astrolabe repo) consumes
+# these to deploy the dashboard onto a NUC without any local build
+# step.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to release (e.g. v0.4.0)"
+        required: true
+        default: "v0.4.0"
+
+# softprops/action-gh-release needs write access to the contents
+# (releases live under repo contents) to attach assets to the release.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build dashboard artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # workflow_dispatch checks out the tag we were asked for; the
+          # tag-push trigger checks out the tag implicitly.
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Resolve version
+        id: ver
+        run: |
+          REF="${{ inputs.tag || github.ref }}"
+          # Strip refs/tags/ prefix; trim a leading 'v' for the wheel
+          # version, keep the original for the binary tarball.
+          TAG="${REF#refs/tags/}"
+          PEP440="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "pep440=${PEP440}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          # No external Go deps — server/ has no go.sum. Disable
+          # cache so setup-go doesn't print a "go.sum not found"
+          # warning every run.
+          cache: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python build tooling
+        run: pip install build hatchling
+
+      - name: Build frontend (bun)
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+          test -d dist
+
+      - name: Build Go binary (linux-amd64)
+        working-directory: server
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: |
+          go build -ldflags="-s -w" -o ../astrolabe-dashboard ./cmd
+          # Tarball with deterministic naming so the install command
+          # can compose the URL from version + platform.
+          cd ..
+          BINARY_TAR="astrolabe-dashboard-${{ steps.ver.outputs.tag }}-linux-amd64.tar.gz"
+          tar czf "${BINARY_TAR}" astrolabe-dashboard
+          ls -la "${BINARY_TAR}"
+
+      - name: Sync wheel version with tag
+        run: |
+          # pyproject.toml ships a placeholder version; align it with
+          # the tag so PEP 440 metadata is consistent. sed in-place
+          # works on Linux (CI runner); the macOS sed dance isn't
+          # needed here.
+          sed -i "s/^version = \".*\"/version = \"${{ steps.ver.outputs.pep440 }}\"/" pyproject.toml
+          grep "^version" pyproject.toml
+
+      - name: Build Python wheel
+        run: |
+          # Write wheel to dist-py/ so it doesn't collide with the
+          # vite/bun static bundle that already lives in dist/.
+          python -m build --wheel --outdir dist-py
+          ls -la dist-py/
+
+      - name: Stage release artifacts
+        run: |
+          mkdir -p release-artifacts
+          mv dist-py/*.whl release-artifacts/
+          mv astrolabe-dashboard-${{ steps.ver.outputs.tag }}-linux-amd64.tar.gz release-artifacts/
+          cd release-artifacts
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create / update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            release-artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

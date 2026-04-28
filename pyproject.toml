@@ -1,0 +1,57 @@
+# Python packaging for the dashboard's static bundle.
+#
+# This is a stub package — the dashboard is a Go binary serving a
+# React frontend. We package the *static* (the result of `bun run
+# build`) as a Python wheel so astrolabe can consume it via the
+# `astrolabe admin dashboard install` flow without having to know about
+# bun/npm. The wheel ships zero Python code; just data.
+#
+# The Go binary ships separately as a per-platform tarball attached to
+# the same GitHub release.
+#
+# Build (locally or in CI):
+#   bun run build         # produces dist/
+#   python -m build .     # produces dist-py/astrolabe_dashboard-VERSION-py3-none-any.whl
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "astrolabe-dashboard"
+version = "0.4.0"
+description = "Static frontend bundle for the astrolabe dashboard."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Nathan Paull" }]
+
+[project.urls]
+Source = "https://github.com/naston/astrolabe-insights-hub"
+
+# The wheel contains the contents of dist/ verbatim, exposed under the
+# astrolabe_dashboard import name. astrolabe's install flow imports
+# `astrolabe_dashboard` to find the static path.
+#
+# How the wheel gets built:
+#   1. CI runs `bun run build` → dist/ contains the React static.
+#   2. CI runs `python -m build --wheel`.
+#   3. Hatchling invokes our custom hook (build_hook.py) which copies
+#      dist/ → astrolabe_dashboard/static/ in the build dir, then
+#      registers those files as "force_include" entries.
+#   4. Hatchling assembles the wheel, picking up the force-included
+#      files even though they aren't in the original source tree.
+#
+# We *don't* set [tool.hatch.build] include because that glob is
+# evaluated against the source tree before the hook runs — at which
+# point astrolabe_dashboard/ is empty. Relying solely on force_include
+# avoids the chicken-and-egg.
+[tool.hatch.build.targets.wheel]
+# Force-include is what populates the wheel; this just declares the
+# package directory hatchling should expect to ship.
+packages = ["astrolabe_dashboard"]
+# Allow build with no Python source — the wheel is data-only.
+bypass-selection = true
+
+[tool.hatch.build.hooks.custom]
+path = "build_hook.py"

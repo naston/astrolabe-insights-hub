@@ -10,11 +10,24 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+dist-py
 .output
 .vinxi
 .tanstack/**
 .nitro
 *.local
+
+# Hatchling staging dir (build_hook.py copies dist/ here at wheel-build time).
+# Local dev rebuilds it; CI does the same. Never check in.
+astrolabe_dashboard/
+
+# Go build outputs (server/Makefile)
+server/astrolabe-dashboard
+server/astrolabe-dashboard-linux-amd64
+
+# Python build artifacts
+__pycache__/
+*.pyc
 
 # Wrangler / Cloudflare
 .wrangler/
