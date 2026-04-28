@@ -24,6 +24,11 @@ on:
         required: true
         default: "v0.4.0"
 
+# softprops/action-gh-release needs write access to the contents
+# (releases live under repo contents) to attach assets to the release.
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build dashboard artifacts
