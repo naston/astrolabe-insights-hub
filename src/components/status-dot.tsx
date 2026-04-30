@@ -29,21 +29,10 @@ export function StatusDot({ state, className, size = "md" }: Props) {
       aria-label={state.toLowerCase()}
       className={cn("relative inline-flex items-center justify-center", className)}
     >
-      <span
-        className={cn(
-          "inline-block rounded-full",
-          dim,
-          TONE_BG[tone],
-          live && "pulse-dot",
-        )}
-      />
+      <span className={cn("inline-block rounded-full", dim, TONE_BG[tone], live && "pulse-dot")} />
       {live && (
         <span
-          className={cn(
-            "absolute inset-0 rounded-full opacity-40",
-            TONE_BG[tone],
-            "blur-[3px]",
-          )}
+          className={cn("absolute inset-0 rounded-full opacity-40", TONE_BG[tone], "blur-[3px]")}
         />
       )}
     </span>

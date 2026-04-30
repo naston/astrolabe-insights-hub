@@ -14,7 +14,7 @@ import { useGlobalShortcuts } from "@/hooks/use-global-shortcuts";
  * sort. Storing as comma-joined keeps the URL compact when several
  * values are selected and survives copy-paste.
  */
-type SearchParams = {
+export type SearchParams = {
   status?: string;
   submitter?: string;
   repo?: string;

@@ -64,10 +64,7 @@ export function ShortcutsHelp({
               </div>
               <ul className="divide-y divide-border">
                 {items.map((s) => (
-                  <li
-                    key={s.label}
-                    className="flex items-center justify-between py-1.5 text-sm"
-                  >
+                  <li key={s.label} className="flex items-center justify-between py-1.5 text-sm">
                     <span>{s.label}</span>
                     <span className="flex items-center gap-1">
                       {s.keys.map((k, i) => (

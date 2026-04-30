@@ -134,7 +134,10 @@ export function seedExperiments(): Experiment[] {
     // Stable Linear-doc URL slug derived from the experiment name. Real
     // backend will populate this from each experiment's recorded
     // linear_doc_url; the seed mirrors the shape so the link wires through.
-    const slug = s.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase().replace(/^-|-$/g, "");
+    const slug = s.name
+      .replace(/[^a-z0-9]+/gi, "-")
+      .toLowerCase()
+      .replace(/^-|-$/g, "");
     return {
       name: s.name,
       state: s.state,
@@ -180,9 +183,7 @@ export function seedRuns(experiment: string): Run[] {
     const isLatestVersion = v === spec.versions;
     // Older versions sit ~1-3 days behind the next version's creation time.
     const ageDays = (spec.versions - v) * (1.5 + (v % 2));
-    const versionAgeSec = isLatestVersion
-      ? spec.latestAgeSec
-      : spec.latestAgeSec + ageDays * DAY;
+    const versionAgeSec = isLatestVersion ? spec.latestAgeSec : spec.latestAgeSec + ageDays * DAY;
     const versionDuration = isLatestVersion
       ? spec.duration
       : Math.round(spec.duration * (0.6 + ((v * 37) % 80) / 100));
@@ -218,9 +219,7 @@ export function seedRuns(experiment: string): Run[] {
         ],
         // Different runs in the same version land at slightly different final
         // losses — that's the point of comparing them.
-        final_loss: versionActive
-          ? null
-          : 0.4 + ((v * 13 + r * 29) % 100) / 250,
+        final_loss: versionActive ? null : 0.4 + ((v * 13 + r * 29) % 100) / 250,
       });
     }
   }
@@ -246,9 +245,9 @@ export function seedMetric(hash: string, name: string): MetricSeries {
     let v: number;
     if (name.startsWith("train/loss") || name === "train/loss") {
       // Exponential decay from ~3.5 to ~0.4 with a little noise
-      v = 0.35 + 3.0 * Math.exp(-i / (40 + offset * 30)) + (Math.sin(i / 7 + offset * 6) * 0.04);
+      v = 0.35 + 3.0 * Math.exp(-i / (40 + offset * 30)) + Math.sin(i / 7 + offset * 6) * 0.04;
     } else if (name === "eval/loss") {
-      v = 0.55 + 2.5 * Math.exp(-i / (35 + offset * 25)) + (Math.sin(i / 9) * 0.05);
+      v = 0.55 + 2.5 * Math.exp(-i / (35 + offset * 25)) + Math.sin(i / 9) * 0.05;
     } else if (name === "eval/accuracy") {
       v = 1 - Math.exp(-i / (30 + offset * 25)) * (0.85 - offset * 0.1);
     } else if (name === "lr") {

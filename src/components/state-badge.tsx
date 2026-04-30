@@ -2,10 +2,7 @@ import { cn } from "@/lib/utils";
 import { stateTone, outcomeTone } from "@/lib/format";
 import type { ExperimentState, ExperimentOutcome } from "@/lib/types";
 
-const TONE_CLASS: Record<
-  "success" | "destructive" | "warning" | "info" | "muted",
-  string
-> = {
+const TONE_CLASS: Record<"success" | "destructive" | "warning" | "info" | "muted", string> = {
   success:
     "text-[var(--success)] bg-[color-mix(in_oklab,var(--success)_15%,transparent)] ring-[color-mix(in_oklab,var(--success)_30%,transparent)]",
   destructive:

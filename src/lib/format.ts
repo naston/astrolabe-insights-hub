@@ -56,21 +56,14 @@ export function shortHash(hash: string, n = 7): string {
 
 export function isActiveState(s: ExperimentState): boolean {
   return (
-    s === "ACQUIRING" ||
-    s === "SETUP" ||
-    s === "RUNNING" ||
-    s === "HEALING" ||
-    s === "SUMMARIZING"
+    s === "ACQUIRING" || s === "SETUP" || s === "RUNNING" || s === "HEALING" || s === "SUMMARIZING"
   );
 }
 
 /** Map state → semantic palette token name (used by StateBadge / dots). */
-export function stateTone(state: ExperimentState):
-  | "success"
-  | "destructive"
-  | "warning"
-  | "info"
-  | "muted" {
+export function stateTone(
+  state: ExperimentState,
+): "success" | "destructive" | "warning" | "info" | "muted" {
   switch (state) {
     case "COMPLETED":
       return "success";
@@ -89,11 +82,7 @@ export function stateTone(state: ExperimentState):
   }
 }
 
-export function outcomeTone(o: ExperimentOutcome):
-  | "success"
-  | "destructive"
-  | "warning"
-  | "muted" {
+export function outcomeTone(o: ExperimentOutcome): "success" | "destructive" | "warning" | "muted" {
   switch (o) {
     case "success":
       return "success";

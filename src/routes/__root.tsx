@@ -1,6 +1,6 @@
 import { Outlet, Link, createRootRoute } from "@tanstack/react-router";
 
-import { ThemeProvider } from "@/hooks/use-theme";
+import { ThemeProvider } from "@/hooks/theme-provider";
 
 function NotFoundComponent() {
   return (

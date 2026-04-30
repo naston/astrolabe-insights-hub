@@ -27,12 +27,7 @@ export interface FilterDropdownProps {
   onChange: (next: string[]) => void;
 }
 
-export function FilterDropdown({
-  label,
-  options,
-  selected,
-  onChange,
-}: FilterDropdownProps) {
+export function FilterDropdown({ label, options, selected, onChange }: FilterDropdownProps) {
   const [open, setOpen] = useState(false);
 
   const sortedOptions = useMemo(
@@ -66,11 +61,7 @@ export function FilterDropdown({
           variant="outline"
           size="sm"
           aria-pressed={selected.length > 0}
-          className={
-            selected.length > 0
-              ? "border-primary text-primary"
-              : ""
-          }
+          className={selected.length > 0 ? "border-primary text-primary" : ""}
         >
           {triggerText}
           <ChevronDown className="ml-2 h-3 w-3" />
@@ -78,9 +69,7 @@ export function FilterDropdown({
       </PopoverTrigger>
       <PopoverContent align="start" className="w-56 p-2">
         <div className="flex items-center justify-between px-1 pb-1">
-          <span className="text-xs font-medium text-muted-foreground">
-            {label}
-          </span>
+          <span className="text-xs font-medium text-muted-foreground">{label}</span>
           {selected.length > 0 && (
             <button
               type="button"
@@ -93,9 +82,7 @@ export function FilterDropdown({
         </div>
         <div className="max-h-72 overflow-y-auto">
           {sortedOptions.length === 0 ? (
-            <div className="px-2 py-1.5 text-xs text-muted-foreground">
-              No options yet
-            </div>
+            <div className="px-2 py-1.5 text-xs text-muted-foreground">No options yet</div>
           ) : (
             sortedOptions.map((opt) => (
               <label
@@ -108,9 +95,7 @@ export function FilterDropdown({
                 />
                 <span className="flex-1 truncate">{opt.label}</span>
                 {opt.count !== undefined && (
-                  <span className="text-xs text-muted-foreground">
-                    {opt.count}
-                  </span>
+                  <span className="text-xs text-muted-foreground">{opt.count}</span>
                 )}
               </label>
             ))
