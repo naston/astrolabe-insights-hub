@@ -30,8 +30,6 @@ interface MetricChartProps {
   metricName: string;
   runs: ChartRunSpec[];
   xMode: XAxisMode;
-  /** Hash-keyed start times so we can compute wall_time even when the API only provides steps. */
-  runCreationMs: Record<string, number>;
 }
 
 interface SeriesPoint {
@@ -47,12 +45,7 @@ interface SeriesPoint {
  * Polls metrics for active runs only at `ACTIVE_POLL_MS`. Inactive runs are
  * fetched once and then cached for the lifetime of the component.
  */
-export function MetricChart({
-  metricName,
-  runs,
-  xMode,
-  runCreationMs,
-}: MetricChartProps) {
+export function MetricChart({ metricName, runs, xMode }: MetricChartProps) {
   const { domain, setDomain, reset } = useChartZoom();
   const [seriesByRun, setSeriesByRun] = useState<Record<string, MetricSeries>>({});
   const [errorByRun, setErrorByRun] = useState<Record<string, string>>({});
@@ -128,8 +121,7 @@ export function MetricChart({
         // (NOT epoch timestamps). Display as elapsed time. When missing,
         // fall back to step number — a researcher seeing "step 50" instead
         // of "5m" is at least not wrong.
-        const wall =
-          series.wall_times?.[i] != null ? series.wall_times[i] : step;
+        const wall = series.wall_times?.[i] != null ? series.wall_times[i] : step;
         const x = xMode === "step" ? step : wall;
         const existing = map.get(x) ?? { x };
         existing[run.hash] = value;
@@ -137,7 +129,7 @@ export function MetricChart({
       }
     }
     return Array.from(map.values()).sort((a, b) => a.x - b.x);
-  }, [seriesByRun, runs, xMode, runCreationMs]);
+  }, [seriesByRun, runs, xMode]);
 
   // Drag-to-zoom state — we track refAreaLeft / refAreaRight on the X axis.
   const [refLeft, setRefLeft] = useState<number | null>(null);
@@ -147,6 +139,33 @@ export function MetricChart({
   const xDomain: [number | string, number | string] = domain
     ? [domain.min, domain.max]
     : ["dataMin", "dataMax"];
+
+  // When zoomed on x, recompute y bounds from only the visible-x slice so
+  // narrow late-training variation isn't squashed by the full-series range.
+  // Recharts' built-in `domain={["auto", "auto"]}` resolves against ALL data,
+  // not the clipped subset, so we have to compute the slice ourselves.
+  const yDomain = useMemo<[number | string, number | string]>(() => {
+    if (!domain) return ["auto", "auto"];
+    let yMin = Infinity;
+    let yMax = -Infinity;
+    for (const point of data) {
+      if (point.x < domain.min || point.x > domain.max) continue;
+      for (const run of runs) {
+        if (!run.visible) continue;
+        const v = point[run.hash];
+        if (typeof v !== "number" || !isFinite(v)) continue;
+        if (v < yMin) yMin = v;
+        if (v > yMax) yMax = v;
+      }
+    }
+    if (!isFinite(yMin) || !isFinite(yMax)) return ["auto", "auto"];
+    // 5% padding on each side so points don't touch the axis edges. Falls
+    // back to abs(value)*0.05 (or a constant) for single-point or constant
+    // slices where the range is zero.
+    const range = yMax - yMin;
+    const pad = range > 0 ? range * 0.05 : Math.max(Math.abs(yMin), 1) * 0.05;
+    return [yMin - pad, yMax + pad];
+  }, [data, domain, runs]);
 
   const visibleRuns = runs.filter((r) => r.visible);
   const totalPoints = data.length;
@@ -158,8 +177,7 @@ export function MetricChart({
         <div className="flex items-center gap-2">
           <span className="font-mono text-xs text-foreground">{metricName}</span>
           <span className="font-mono text-[10px] text-muted-foreground">
-            {visibleRuns.length} run{visibleRuns.length === 1 ? "" : "s"} ·{" "}
-            {totalPoints} pts
+            {visibleRuns.length} run{visibleRuns.length === 1 ? "" : "s"} · {totalPoints} pts
           </span>
         </div>
         {domain && (
@@ -213,11 +231,7 @@ export function MetricChart({
                 setRefRight(null);
               }}
             >
-              <CartesianGrid
-                stroke="var(--border)"
-                strokeDasharray="2 4"
-                vertical={false}
-              />
+              <CartesianGrid stroke="var(--border)" strokeDasharray="2 4" vertical={false} />
               <XAxis
                 dataKey="x"
                 type="number"
@@ -225,9 +239,7 @@ export function MetricChart({
                 allowDataOverflow
                 stroke="var(--muted-foreground)"
                 tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
-                tickFormatter={(v: number) =>
-                  xMode === "step" ? formatStep(v) : formatElapsed(v)
-                }
+                tickFormatter={(v: number) => (xMode === "step" ? formatStep(v) : formatElapsed(v))}
               />
               <YAxis
                 stroke="var(--muted-foreground)"
@@ -237,18 +249,17 @@ export function MetricChart({
                 // Default Recharts domain is [0, dataMax] which wastes
                 // vertical space and squashes the actually-interesting
                 // range when loss values cluster (e.g. eval/loss between
-                // 2.4 and 2.6). 'auto' lets Recharts pick min/max from
-                // the visible data with sensible padding.
-                domain={["auto", "auto"]}
+                // 2.4 and 2.6). When unzoomed we let Recharts auto-fit
+                // against the full series; when zoomed `yDomain` is
+                // computed from the visible-x slice (see above) so y
+                // rescales to the visible window.
+                domain={yDomain}
+                allowDataOverflow
               />
               <Tooltip
                 cursor={{ stroke: "var(--border-strong)", strokeWidth: 1 }}
                 content={(props: unknown) => (
-                  <ChartTooltip
-                    {...(props as TooltipProps)}
-                    runs={visibleRuns}
-                    xMode={xMode}
-                  />
+                  <ChartTooltip {...(props as TooltipProps)} runs={visibleRuns} xMode={xMode} />
                 )}
               />
               {visibleRuns.map((run) => (
@@ -350,10 +361,7 @@ function ChartTooltip({ active, payload, label, runs, xMode }: TooltipProps) {
           .map((p) => {
             const run = runByHash.get(p.dataKey);
             return (
-              <li
-                key={p.dataKey}
-                className="flex items-center gap-2 text-foreground"
-              >
+              <li key={p.dataKey} className="flex items-center gap-2 text-foreground">
                 <span
                   className="inline-block h-2 w-2 rounded-sm"
                   style={{ backgroundColor: p.color }}

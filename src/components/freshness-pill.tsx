@@ -1,10 +1,5 @@
 import { useEffect, useState } from "react";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -67,13 +62,7 @@ export function FreshnessPill({ lastUpdated, intervalMs, className }: Props) {
             )}
             aria-label={tooltipText(lastUpdated, status)}
           >
-            <span
-              className={cn(
-                "inline-block h-2 w-2 rounded-full ring-2",
-                dotClass,
-                ringClass,
-              )}
-            />
+            <span className={cn("inline-block h-2 w-2 rounded-full ring-2", dotClass, ringClass)} />
           </button>
         </TooltipTrigger>
         <TooltipContent side="bottom" className="font-mono text-[11px]">

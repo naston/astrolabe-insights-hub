@@ -3,13 +3,16 @@ import { Search, X } from "lucide-react";
 import { api } from "@/lib/api";
 import type { Experiment, Run } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { formatDuration, formatRelative } from "@/lib/format";
+import { formatRelative } from "@/lib/format";
 import { CopyableHash } from "@/components/copyable-hash";
 
 export interface ComparisonRunPick {
   hash: string;
   name: string;
   experiment: string;
+  /** Submitter identity, when known. Drives the "by alice" line on the
+   * comparison view when runs span multiple users. */
+  submitted_by?: string;
 }
 
 interface Props {
@@ -44,7 +47,9 @@ export function ComparisonModal({
       .experiments(ctrl.signal)
       .then((list) => {
         setExperiments(list.filter((e) => e.name !== currentExperiment));
-        setSelectedExp((curr) => curr ?? list.find((e) => e.name !== currentExperiment)?.name ?? null);
+        setSelectedExp(
+          (curr) => curr ?? list.find((e) => e.name !== currentExperiment)?.name ?? null,
+        );
       })
       .catch(() => {
         /* ignore */
@@ -189,8 +194,7 @@ export function ComparisonModal({
                           )}
                         </div>
                         <div className="mt-0.5 text-[11px] text-muted-foreground font-mono text-tabular">
-                          {formatDuration(r.duration)} ·{" "}
-                          {formatRelative(r.creation_time)} ·{" "}
+                          {r.duration} · {formatRelative(r.creation_time)} ·{" "}
                           {r.final_loss != null
                             ? `loss ${r.final_loss.toFixed(4)}`
                             : "no final loss"}
@@ -203,6 +207,7 @@ export function ComparisonModal({
                             hash: r.hash,
                             name: r.name,
                             experiment: r.experiment,
+                            submitted_by: r.submitted_by,
                           })
                         }
                         className={cn(

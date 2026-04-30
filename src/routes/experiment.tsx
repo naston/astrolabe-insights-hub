@@ -1,23 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { z } from "zod";
-import {
-  ArrowLeft,
-  ChevronDown,
-  ExternalLink,
-  Plus,
-  Search,
-} from "lucide-react";
+import { ArrowLeft, ChevronDown, ExternalLink, Plus, Search } from "lucide-react";
 
 import { api, DEFAULT_PALETTE } from "@/lib/api";
 import type { Experiment, MetricSeries, Run } from "@/lib/types";
 import { usePolling } from "@/hooks/use-polling";
-import {
-  formatDuration,
-  formatRelative,
-  formatTimestamp,
-  isActiveState,
-} from "@/lib/format";
+import { formatDuration, formatRelative, formatTimestamp, isActiveState } from "@/lib/format";
 import { CopyableHash } from "@/components/copyable-hash";
 import { cn } from "@/lib/utils";
 
@@ -26,10 +15,8 @@ import { StatusDot } from "@/components/status-dot";
 import { StateBadge } from "@/components/state-badge";
 import { FreshnessPill } from "@/components/freshness-pill";
 import { FSMHistory } from "@/components/fsm-history";
-import {
-  ChartZoomProvider,
-  type XAxisMode,
-} from "@/hooks/use-chart-zoom";
+import { ChartZoomProvider } from "@/hooks/chart-zoom-provider";
+import { type XAxisMode } from "@/hooks/use-chart-zoom";
 import { MetricChart, type ChartRunSpec } from "@/components/metric-chart";
 import { ComparisonModal, type ComparisonRunPick } from "@/components/comparison-modal";
 import { ShortcutsHelp } from "@/components/shortcuts-help";
@@ -107,22 +94,18 @@ function ExperimentBody({
   const navigate = useNavigate();
 
   // Experiments list (so we can find this experiment's metadata)
-  const expState = usePolling(
-    (signal) => api.experiments(signal),
-    [],
-    { intervalMs: RUNS_POLL_MS },
-  );
+  const expState = usePolling((signal) => api.experiments(signal), [], {
+    intervalMs: RUNS_POLL_MS,
+  });
   const experiment: Experiment | undefined = useMemo(
     () => expState.data?.find((e) => e.name === experimentName),
     [expState.data, experimentName],
   );
 
   // Runs for this experiment — each run is one submitted "version".
-  const runsState = usePolling(
-    (signal) => api.runs(experimentName, signal),
-    [experimentName],
-    { intervalMs: RUNS_POLL_MS },
-  );
+  const runsState = usePolling((signal) => api.runs(experimentName, signal), [experimentName], {
+    intervalMs: RUNS_POLL_MS,
+  });
 
   // Group runs by version. One submit (= one version) typically contains
   // multiple runs (one per declared training job — e.g. BERT + LatentBERT).
@@ -140,8 +123,7 @@ function ExperimentBody({
         // creation_time is Unix seconds (number) from the Aim REST API.
         // Math.min for proper numeric comparison, not Array.sort()
         // which would default to string-lexicographic ordering.
-        const createdAt =
-          runs.length > 0 ? Math.min(...runs.map((r) => r.creation_time)) : 0;
+        const createdAt = runs.length > 0 ? Math.min(...runs.map((r) => r.creation_time)) : 0;
         return { label, runs, createdAt };
       })
       .sort((a, b) => a.createdAt - b.createdAt);
@@ -156,8 +138,7 @@ function ExperimentBody({
     return match ?? versions[versions.length - 1];
   }, [versions, versionParam, isLatestPin]);
 
-  const isOnLatest =
-    selectedVersion && selectedVersion === versions[versions.length - 1];
+  const isOnLatest = selectedVersion && selectedVersion === versions[versions.length - 1];
 
   // Color palette from API (with fallback)
   const [palette, setPalette] = useState<string[]>(DEFAULT_PALETTE);
@@ -186,9 +167,7 @@ function ExperimentBody({
   // Track which run hashes the user has explicitly removed via the X
   // button. We respect those across re-fetches of /includes so the
   // include doesn't keep re-adding a run the user dismissed.
-  const [removedFromIncludes, setRemovedFromIncludes] = useState<Set<string>>(
-    new Set(),
-  );
+  const [removedFromIncludes, setRemovedFromIncludes] = useState<Set<string>>(new Set());
 
   // Includes that came back type="unknown" — no Aim runs matched the
   // string. We track these so we can render an "unresolved" banner
@@ -259,11 +238,9 @@ function ExperimentBody({
         hash: r.hash,
         name: r.name,
         experiment: r.experiment,
+        submitted_by: r.submitted_by,
       })) ?? [];
-    return [
-      ...native,
-      ...comparison.filter((c) => !native.find((n) => n.hash === c.hash)),
-    ];
+    return [...native, ...comparison.filter((c) => !native.find((n) => n.hash === c.hash))];
   }, [selectedVersion, comparison]);
 
   // Per-run metadata: active flag + creationMs (for wall-time x-axis) +
@@ -345,14 +322,6 @@ function ExperimentBody({
     }));
   }, [visibleRuns, runColors, runMeta, hiddenRuns]);
 
-  const runCreationMs = useMemo(() => {
-    const map: Record<string, number> = {};
-    for (const [hash, meta] of Object.entries(runMeta)) {
-      map[hash] = meta.creationMs;
-    }
-    return map;
-  }, [runMeta]);
-
   // Discover available metrics across all runs (native + included)
   const metricNames = useMemo(() => {
     const set = new Set<string>();
@@ -397,10 +366,7 @@ function ExperimentBody({
     <AppShell
       rightSlot={
         <FreshnessPill
-          lastUpdated={Math.max(
-            expState.lastUpdated ?? 0,
-            runsState.lastUpdated ?? 0,
-          ) || null}
+          lastUpdated={Math.max(expState.lastUpdated ?? 0, runsState.lastUpdated ?? 0) || null}
           loading={expState.loading || runsState.loading}
           intervalMs={RUNS_POLL_MS}
         />
@@ -419,9 +385,7 @@ function ExperimentBody({
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-3 flex-wrap">
               {experiment && <StatusDot state={experiment.state} />}
-              <h1 className="text-xl font-semibold tracking-tight truncate">
-                {experimentName}
-              </h1>
+              <h1 className="text-xl font-semibold tracking-tight truncate">{experimentName}</h1>
               {experiment?.submitted_by && (
                 <span
                   className="text-xs text-muted-foreground font-mono"
@@ -491,9 +455,7 @@ function ExperimentBody({
               {comparison.length > 0 && (
                 <>
                   <span className="opacity-50">·</span>
-                  <span className="text-foreground">
-                    +{comparison.length} comparison
-                  </span>
+                  <span className="text-foreground">+{comparison.length} comparison</span>
                 </>
               )}
             </div>
@@ -501,12 +463,7 @@ function ExperimentBody({
         </div>
 
         {/* FSM history */}
-        {experiment && (
-          <FSMHistory
-            current={experiment.state}
-            history={experiment.state_history}
-          />
-        )}
+        {experiment && <FSMHistory current={experiment.state} history={experiment.state_history} />}
 
         {/* Unresolved-include banner. v1.4.x surfaces include strings
             that didn't match any hash, experiment, or run name —
@@ -517,13 +474,13 @@ function ExperimentBody({
         {unresolvedIncludes.length > 0 && (
           <div className="rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-xs">
             <div className="text-warning-foreground">
-              <span className="font-medium">Unresolved include{unresolvedIncludes.length > 1 ? "s" : ""}:</span>{" "}
+              <span className="font-medium">
+                Unresolved include{unresolvedIncludes.length > 1 ? "s" : ""}:
+              </span>{" "}
               {unresolvedIncludes.map((n, i) => (
                 <span key={n}>
                   {i > 0 && ", "}
-                  <code className="rounded bg-background/60 px-1 py-0.5 line-through">
-                    {n}
-                  </code>
+                  <code className="rounded bg-background/60 px-1 py-0.5 line-through">{n}</code>
                 </span>
               ))}
               <span className="ml-1 text-muted-foreground">
@@ -548,7 +505,6 @@ function ExperimentBody({
                 metricName={metricName}
                 runs={chartRuns}
                 xMode={xMode}
-                runCreationMs={runCreationMs}
               />
             ))}
           </div>
@@ -561,16 +517,10 @@ function ExperimentBody({
                 X-axis
               </div>
               <div className="flex rounded-md border border-border bg-surface p-0.5 text-xs">
-                <SegButton
-                  active={xMode === "step"}
-                  onClick={() => setXMode("step")}
-                >
+                <SegButton active={xMode === "step"} onClick={() => setXMode("step")}>
                   Step
                 </SegButton>
-                <SegButton
-                  active={xMode === "wall_time"}
-                  onClick={() => setXMode("wall_time")}
-                >
+                <SegButton active={xMode === "wall_time"} onClick={() => setXMode("wall_time")}>
                   Wall time
                 </SegButton>
               </div>
@@ -612,9 +562,7 @@ function ExperimentBody({
                     Show all
                   </button>
                   <button
-                    onClick={() =>
-                      setHiddenRuns(new Set(visibleRuns.map((r) => r.hash)))
-                    }
+                    onClick={() => setHiddenRuns(new Set(visibleRuns.map((r) => r.hash)))}
                     disabled={allHidden}
                     className="flex-1 rounded border border-border bg-surface py-1 text-[10px] uppercase tracking-wider text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-default"
                   >
@@ -697,17 +645,13 @@ function ExperimentBody({
                       {isComparison && (
                         <button
                           onClick={() => {
-                            setComparison((prev) =>
-                              prev.filter((c) => c.hash !== r.hash),
-                            );
+                            setComparison((prev) => prev.filter((c) => c.hash !== r.hash));
                             // Suppress this hash from the auto-include
                             // refetch loop so it doesn't re-appear on
                             // the next poll. Modal re-add (re-include
                             // via the modal) clears it; full page
                             // reload also clears.
-                            setRemovedFromIncludes(
-                              (prev) => new Set([...prev, r.hash]),
-                            );
+                            setRemovedFromIncludes((prev) => new Set([...prev, r.hash]));
                           }}
                           className="opacity-0 group-hover:opacity-100 transition-opacity rounded p-0.5 text-muted-foreground hover:text-destructive hover:bg-muted"
                           aria-label="Remove comparison run"
@@ -793,9 +737,7 @@ function ExperimentBody({
         currentExperiment={experimentName}
         alreadyAdded={new Set(comparison.map((c) => c.hash))}
         onAdd={(run) => {
-          setComparison((prev) =>
-            prev.find((c) => c.hash === run.hash) ? prev : [...prev, run],
-          );
+          setComparison((prev) => (prev.find((c) => c.hash === run.hash) ? prev : [...prev, run]));
           // If this run was previously removed (X), un-suppress it so
           // re-adding via the modal sticks across the next include refetch.
           setRemovedFromIncludes((prev) => {
@@ -841,8 +783,7 @@ function metricDirection(name: string): "min" | "max" {
   // Loss-shaped metrics where lower is better.
   if (/loss|error|perplexity|\bppl\b|nll/i.test(name)) return "min";
   // Score-shaped metrics where higher is better.
-  if (/accuracy|f1|auc|precision|recall|score|\bbleu\b|\brouge\b/i.test(name))
-    return "max";
+  if (/accuracy|f1|auc|precision|recall|score|\bbleu\b|\brouge\b/i.test(name)) return "max";
   // Default to min for anything unclassified — most ML metrics that you'd
   // want to "find the best of" are loss-shaped.
   return "min";
@@ -934,8 +875,7 @@ function RunStatsTable({
       if (measurement === "last") {
         out[r.hash] = s.values[s.values.length - 1];
       } else {
-        out[r.hash] =
-          direction === "min" ? Math.min(...s.values) : Math.max(...s.values);
+        out[r.hash] = direction === "min" ? Math.min(...s.values) : Math.max(...s.values);
       }
     }
     return out;
@@ -951,9 +891,7 @@ function RunStatsTable({
             Run stats
           </span>
           {versionLabel && (
-            <span className="text-[10px] font-mono text-muted-foreground">
-              {versionLabel}
-            </span>
+            <span className="text-[10px] font-mono text-muted-foreground">{versionLabel}</span>
           )}
         </div>
         <div className="flex items-center gap-1">
@@ -1005,10 +943,11 @@ function RunStatsTable({
             <tr>
               <th className="text-left px-2 py-1.5 font-medium">run</th>
               <th className="text-left px-2 py-1.5 font-medium">hash</th>
-              <th className="text-right px-2 py-1.5 font-medium" title={`${metric} · ${measurement}`}>
-                <span className="truncate inline-block max-w-[80px] align-middle">
-                  {metric}
-                </span>
+              <th
+                className="text-right px-2 py-1.5 font-medium"
+                title={`${metric} · ${measurement}`}
+              >
+                <span className="truncate inline-block max-w-[80px] align-middle">{metric}</span>
                 <span className="opacity-60"> · {measurement}</span>
               </th>
               <th className="text-right px-2 py-1.5 font-medium">dur</th>
@@ -1026,16 +965,13 @@ function RunStatsTable({
                 value != null &&
                 Object.values(computed)
                   .filter((v): v is number => v != null)
-                  .every((other) =>
-                    direction === "min" ? value <= other : value >= other,
-                  );
+                  .every((other) => (direction === "min" ? value <= other : value >= other));
               return (
                 <tr
                   key={r.hash}
                   className={cn(
                     "hover:bg-muted/50",
-                    isWinner &&
-                      "bg-[color-mix(in_oklab,var(--success)_8%,transparent)]",
+                    isWinner && "bg-[color-mix(in_oklab,var(--success)_8%,transparent)]",
                   )}
                 >
                   <td className="px-2 py-1.5 align-middle">
@@ -1064,7 +1000,7 @@ function RunStatsTable({
                     {value != null ? value.toFixed(4) : "—"}
                   </td>
                   <td className="px-2 py-1.5 align-middle text-right text-tabular text-muted-foreground">
-                    {formatDuration(r.duration ?? 0)}
+                    {r.duration || "—"}
                   </td>
                   <td
                     className={cn(
@@ -1150,9 +1086,7 @@ function VersionSelector({
         )}
         title="Switch version"
       >
-        <span className="text-tabular text-foreground font-medium">
-          {selectedLabel ?? "—"}
-        </span>
+        <span className="text-tabular text-foreground font-medium">{selectedLabel ?? "—"}</span>
         <span className="opacity-60">of {versions.length}</span>
         {pinnedLatest && (
           <span className="rounded bg-muted px-1 py-px text-[9px] uppercase tracking-wider text-muted-foreground">
@@ -1181,9 +1115,7 @@ function VersionSelector({
               <span className="text-foreground font-medium">latest</span>
               <span className="text-muted-foreground">→ {latest.label}</span>
             </span>
-            <span className="text-[10px] text-muted-foreground">
-              tracks newest
-            </span>
+            <span className="text-[10px] text-muted-foreground">tracks newest</span>
           </button>
           <ul className="max-h-[280px] overflow-y-auto scrollbar-thin">
             {ordered.map((v) => {
@@ -1215,9 +1147,7 @@ function VersionSelector({
                         )}
                       </span>
                     </span>
-                    <span
-                      className="text-[10px] text-muted-foreground text-tabular shrink-0"
-                    >
+                    <span className="text-[10px] text-muted-foreground text-tabular shrink-0">
                       {formatRelative(v.createdAt)}
                     </span>
                   </button>

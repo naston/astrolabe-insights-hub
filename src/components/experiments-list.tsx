@@ -12,6 +12,7 @@ import {
 
 import { api } from "@/lib/api";
 import type { Experiment, ExperimentState, Run } from "@/lib/types";
+import type { SearchParams } from "@/routes/index";
 import { usePolling } from "@/hooks/use-polling";
 import {
   formatDuration,
@@ -99,9 +100,12 @@ function decodeSortKey(raw: string | undefined): SortKey | null {
   if (raw in legacy) return legacy[raw];
   // New shape: validate against the 6 known values.
   const valid: SortKey[] = [
-    "name-asc", "name-desc",
-    "state-asc", "state-desc",
-    "started-asc", "started-desc",
+    "name-asc",
+    "name-desc",
+    "state-asc",
+    "state-desc",
+    "started-asc",
+    "started-desc",
   ];
   return (valid as string[]).includes(raw) ? (raw as SortKey) : null;
 }
@@ -135,7 +139,10 @@ function nextSortKey(column: SortColumn, current: SortKey | null): SortKey | nul
 /** Decode a comma-joined search-param value into a list. */
 function decodeList(raw: string | undefined): string[] {
   if (!raw) return [];
-  return raw.split(",").map((s) => s.trim()).filter(Boolean);
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 /** Encode a list as a comma-joined search-param value (or undefined when empty). */
@@ -175,14 +182,16 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
   // sortKey is null when no explicit sort is applied (default = started-desc, no caret).
   const sortKey: SortKey | null = decodeSortKey(search.sort);
 
-  const updateSearch = (next: Partial<{
-    status: string[];
-    submitter: string[];
-    repo: string[];
-    sort: SortKey | null;
-  }>) => {
+  const updateSearch = (
+    next: Partial<{
+      status: string[];
+      submitter: string[];
+      repo: string[];
+      sort: SortKey | null;
+    }>,
+  ) => {
     navigate({
-      search: (prev) => ({
+      search: (prev: SearchParams) => ({
         ...prev,
         ...(next.status !== undefined && { status: encodeList(next.status) }),
         ...(next.submitter !== undefined && { submitter: encodeList(next.submitter) }),
@@ -198,8 +207,7 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
   const onColumnClick = (column: SortColumn) =>
     updateSearch({ sort: nextSortKey(column, sortKey) });
 
-  const resetFilters = () =>
-    navigate({ search: () => ({}), replace: true });
+  const resetFilters = () => navigate({ search: () => ({}), replace: true });
 
   // Free-text filter — local-only, doesn't survive page reload by
   // design (it's an in-the-moment scan, not a saved view).
@@ -278,8 +286,8 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
     if (effective.startsWith("name-")) {
       list.sort((a, b) => a.name.localeCompare(b.name) * flip);
     } else if (effective.startsWith("state-")) {
-      list.sort((a, b) =>
-        (STATUS_RANK[statusBucket(a.state)] - STATUS_RANK[statusBucket(b.state)]) * flip,
+      list.sort(
+        (a, b) => (STATUS_RANK[statusBucket(a.state)] - STATUS_RANK[statusBucket(b.state)]) * flip,
       );
     } else {
       // started-asc / started-desc (and the default).
@@ -289,9 +297,7 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
   }, [filtered, sortKey]);
 
   const anyFilterActive =
-    selectedStatus.length > 0 ||
-    selectedSubmitter.length > 0 ||
-    selectedRepo.length > 0;
+    selectedStatus.length > 0 || selectedSubmitter.length > 0 || selectedRepo.length > 0;
 
   const counts = useMemo(() => {
     const total = experiments.length;
@@ -315,10 +321,7 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
     const handler = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       const tag = target?.tagName;
-      const isEditable =
-        tag === "INPUT" ||
-        tag === "TEXTAREA" ||
-        target?.isContentEditable;
+      const isEditable = tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable;
 
       if (e.metaKey || e.ctrlKey || e.altKey) return;
 
@@ -431,11 +434,7 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
         )}
 
         <div className="ml-auto flex items-center gap-2">
-          <FreshnessPill
-            lastUpdated={lastUpdated}
-            loading={loading}
-            intervalMs={POLL_MS}
-          />
+          <FreshnessPill lastUpdated={lastUpdated} loading={loading} intervalMs={POLL_MS} />
           <button
             onClick={() => refetch()}
             className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-surface text-muted-foreground hover:text-foreground"
@@ -510,9 +509,7 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
               selected={idx === selectedIdx}
               expanded={!!expanded[exp.name]}
               onSelect={() => setSelectedIdx(idx)}
-              onToggle={() =>
-                setExpanded((m) => ({ ...m, [exp.name]: !m[exp.name] }))
-              }
+              onToggle={() => setExpanded((m) => ({ ...m, [exp.name]: !m[exp.name] }))}
             />
           ))}
         </ul>
@@ -562,9 +559,7 @@ function KpiCard({ label, value, accent, pulse }: KpiProps) {
           <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--info)] pulse-dot" />
         )}
       </div>
-      <div className={cn("mt-1.5 text-2xl font-semibold text-tabular", accentClass)}>
-        {value}
-      </div>
+      <div className={cn("mt-1.5 text-2xl font-semibold text-tabular", accentClass)}>{value}</div>
     </div>
   );
 }
@@ -594,7 +589,9 @@ function SortableHeader({
 }) {
   const isActive = currentSort?.startsWith(`${column}-`);
   const direction: SortDirection | null = isActive
-    ? (currentSort!.endsWith("-asc") ? "asc" : "desc")
+    ? currentSort!.endsWith("-asc")
+      ? "asc"
+      : "desc"
     : null;
   return (
     <button
@@ -604,11 +601,7 @@ function SortableHeader({
         "flex items-center gap-1 text-left transition-colors hover:text-foreground",
         isActive && "text-foreground",
       )}
-      aria-sort={
-        direction === "asc" ? "ascending"
-        : direction === "desc" ? "descending"
-        : "none"
-      }
+      aria-sort={direction === "asc" ? "ascending" : direction === "desc" ? "descending" : "none"}
     >
       <span>{label}</span>
       {direction === "asc" && <ChevronUp className="h-3 w-3" />}
@@ -644,9 +637,7 @@ function ExperimentRow({
         selected && "bg-[color-mix(in_oklab,var(--primary)_8%,transparent)]",
       )}
     >
-      {selected && (
-        <span className="absolute left-0 top-0 h-full w-0.5 bg-primary" />
-      )}
+      {selected && <span className="absolute left-0 top-0 h-full w-0.5 bg-primary" />}
       <div
         className="grid grid-cols-[28px_minmax(260px,1fr)_140px_140px_120px_110px_110px_90px] gap-3 items-center px-3 py-2 cursor-pointer hover:bg-muted/50"
         onClick={onSelect}
@@ -733,7 +724,9 @@ function RunsPanel({ experimentName }: { experimentName: string }) {
   // 2-3 things being compared (e.g., BERT vs LatentBERT).
   const groups = useMemo(() => {
     if (!data) return null;
-    const byVersion = new Map<string, { label: string; runs: Run[]; createdAt: string }>();
+    // creation_time is Unix seconds (float) per Run type — keep numeric for
+    // the min() and the sort comparator instead of round-tripping through Date.
+    const byVersion = new Map<string, { label: string; runs: Run[]; createdAt: number }>();
     for (const run of data) {
       const label = run.version || "v1";
       const entry = byVersion.get(label);
@@ -748,9 +741,7 @@ function RunsPanel({ experimentName }: { experimentName: string }) {
         });
       }
     }
-    return Array.from(byVersion.values()).sort(
-      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
-    );
+    return Array.from(byVersion.values()).sort((a, b) => a.createdAt - b.createdAt);
   }, [data]);
 
   const latest = groups && groups.length > 0 ? groups[groups.length - 1] : null;
@@ -814,13 +805,7 @@ function RunsPanel({ experimentName }: { experimentName: string }) {
   );
 }
 
-function VersionBadge({
-  versionCount,
-  runCount,
-}: {
-  versionCount: number;
-  runCount: number;
-}) {
+function VersionBadge({ versionCount, runCount }: { versionCount: number; runCount: number }) {
   // Cardinality cue — make it obvious that one row = N versions of an
   // experiment, and each version typically holds multiple runs (e.g.
   // BERT + LatentBERT). Both numbers are useful at a scan: ×N v says
@@ -830,9 +815,7 @@ function VersionBadge({
       className="inline-flex items-center gap-1 rounded-md border border-border bg-surface px-1.5 py-0.5 text-[10px] font-mono text-muted-foreground"
       title={`${versionCount} version${versionCount === 1 ? "" : "s"} · ${runCount} run${runCount === 1 ? "" : "s"} total`}
     >
-      <span className="text-tabular text-foreground font-medium">
-        ×{versionCount}
-      </span>
+      <span className="text-tabular text-foreground font-medium">×{versionCount}</span>
       <span className="opacity-60">v</span>
       <span className="opacity-40">·</span>
       <span className="text-tabular text-muted-foreground">{runCount}</span>
@@ -879,9 +862,7 @@ function RunRow({
             running
           </span>
         ) : (
-          <span className="text-[10px] font-mono uppercase text-muted-foreground">
-            done
-          </span>
+          <span className="text-[10px] font-mono uppercase text-muted-foreground">done</span>
         )}
       </span>
     </li>

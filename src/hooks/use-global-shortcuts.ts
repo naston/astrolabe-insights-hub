@@ -20,10 +20,7 @@ export function useGlobalShortcuts({ onHelpToggle }: Options = {}) {
       const target = e.target as HTMLElement | null;
       const tag = target?.tagName;
       const isEditable =
-        tag === "INPUT" ||
-        tag === "TEXTAREA" ||
-        tag === "SELECT" ||
-        target?.isContentEditable;
+        tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable;
 
       if (e.metaKey || e.ctrlKey || e.altKey) return;
 

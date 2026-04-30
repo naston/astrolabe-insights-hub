@@ -73,7 +73,10 @@ export function FSMHistory({ current, history }: Props) {
                   className={cn(
                     "relative flex h-5 w-5 items-center justify-center rounded-full ring-2 transition-colors",
                     isCurrent
-                      ? cn(TONE_BG[tone], "ring-[color-mix(in_oklab,var(--background)_0%,transparent)]")
+                      ? cn(
+                          TONE_BG[tone],
+                          "ring-[color-mix(in_oklab,var(--background)_0%,transparent)]",
+                        )
                       : isVisited
                         ? cn("bg-muted", "ring-border-strong")
                         : "bg-background ring-border",
@@ -103,9 +106,7 @@ export function FSMHistory({ current, history }: Props) {
                 <div
                   className={cn(
                     "flex-1 h-px mx-1.5 -mt-3.5",
-                    isVisited && visited.has(states[i + 1])
-                      ? "bg-border-strong"
-                      : "bg-border",
+                    isVisited && visited.has(states[i + 1]) ? "bg-border-strong" : "bg-border",
                   )}
                 />
               )}
@@ -118,9 +119,7 @@ export function FSMHistory({ current, history }: Props) {
           {history.slice(-4).map((h, i) => (
             <li key={i} className="flex items-center justify-between">
               <span className="text-foreground">{h.state}</span>
-              <span className="text-tabular">
-                {new Date(h.at).toLocaleTimeString()}
-              </span>
+              <span className="text-tabular">{new Date(h.at).toLocaleTimeString()}</span>
             </li>
           ))}
         </ul>

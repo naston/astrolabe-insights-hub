@@ -6,13 +6,7 @@ import type {
   MetricSeries,
   Run,
 } from "./types";
-import {
-  seedColors,
-  seedExperiments,
-  seedIncludes,
-  seedMetric,
-  seedRuns,
-} from "./seed-data";
+import { seedColors, seedExperiments, seedIncludes, seedMetric, seedRuns } from "./seed-data";
 
 const BASE = "/api";
 
