@@ -244,8 +244,22 @@ func (c *AimClient) GetMetric(runHash string, metricName string, context map[str
 		return nil, fmt.Errorf("decoding metric data: %w", err)
 	}
 
+	// Empty result set means the run hasn't logged this metric yet —
+	// a normal state for runs in the window between submit and the
+	// first batch_end hook. Return an empty MetricData (not an error)
+	// so the handler propagates "no data yet" as a 200 + empty arrays
+	// rather than a 502, which the frontend used to interpret as a
+	// failure and silently substitute a synthetic exponential-decay
+	// curve, rendering filler traces for runs that simply hadn't
+	// produced data yet. Empty MetricData → empty trace → chart
+	// correctly omits the run from the rendered series.
 	if len(results) == 0 {
-		return nil, fmt.Errorf("no data for metric %s", metricName)
+		return &MetricData{
+			Name:    metricName,
+			Context: context,
+			Values:  []float64{},
+			Iters:   []int{},
+		}, nil
 	}
 	return &results[0], nil
 }

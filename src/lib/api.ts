@@ -10,14 +10,37 @@ import { seedColors, seedExperiments, seedIncludes, seedMetric, seedRuns } from 
 
 const BASE = "/api";
 
+/** Thrown when the backend is reachable but returned an HTTP error (4xx/5xx).
+ *  Distinguished from network errors so withSeed can decide whether to
+ *  serve the deterministic seed dataset (only on actual unreachability,
+ *  never on backend errors — those should propagate so the UI shows real
+ *  state instead of papering over with synthetic data). */
+class HTTPError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly statusText: string,
+    public readonly path: string,
+  ) {
+    super(`${status} ${statusText} — ${path}`);
+    this.name = "HTTPError";
+  }
+}
+
 async function getJSON<T>(path: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${BASE}${path}`, { signal });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText} — ${path}`);
+  if (!res.ok) throw new HTTPError(res.status, res.statusText, path);
   return (await res.json()) as T;
 }
 
 /** Wraps a real API call with a deterministic seed-data fallback so the
- *  dashboard is fully reviewable when the Go backend isn't reachable. */
+ *  dashboard is fully reviewable when the Go backend isn't reachable.
+ *
+ *  Seed activation is deliberately narrow: only true fetch failures
+ *  (network down, no server at /api, CORS) trigger the fallback. HTTP
+ *  errors from a reachable backend (4xx/5xx) propagate to the caller
+ *  so the UI shows the real state — empty data, missing run, server
+ *  error — instead of fabricating a 200-point exponential decay curve
+ *  for runs that simply haven't logged anything yet. */
 async function withSeed<T>(
   call: () => Promise<T>,
   seed: () => T,
@@ -27,8 +50,11 @@ async function withSeed<T>(
     return await call();
   } catch (err) {
     if (signal?.aborted) throw err;
-    // Network / 404 / parse error → serve the seed dataset so the UI stays
-    // navigable. We deliberately don't log noisily on every poll tick.
+    // Backend reachable but returned a non-2xx — propagate.
+    if (err instanceof HTTPError) throw err;
+    // Network / fetch / parse error → serve seed so the UI stays
+    // navigable in offline-preview mode. We deliberately don't log
+    // noisily on every poll tick.
     return seed();
   }
 }
