@@ -53,6 +53,33 @@ func TestResolveInclude_Hash(t *testing.T) {
 	if len(got.Runs) != 1 || got.Runs[0] != "a1b2c3d4e5f60708090a0b0c" {
 		t.Errorf("Runs = %v, want single hash", got.Runs)
 	}
+	// v1.6.2 fix: hash-resolved includes must surface the run's
+	// meaningful name (e.g. "bert-tiny") instead of the hash so the
+	// comparison panel chip is readable. Without this fix, the chip
+	// rendered as the 24-char hash — confusing when comparing several
+	// hash-included runs side-by-side.
+	if got.Name != "bert-tiny" {
+		t.Errorf("Name = %q, want %q (run.name from Aim)", got.Name, "bert-tiny")
+	}
+}
+
+func TestResolveInclude_Hash_NameDefaultsToInputWhenAimNameEmpty(t *testing.T) {
+	// Defensive: if Aim returned an empty Name for the matched run
+	// (legacy data, manual import, etc.) we fall back to the hash so
+	// the comparison panel still renders something rather than an
+	// empty chip.
+	r := RunSummary{Hash: "e0e1e2e3e4e5e6e7e8e9eaeb", Name: "", ExperimentName: "exp-Z", CreationTime: 5.0}
+	byExp := map[string][]RunSummary{"exp-Z": {r}}
+	byHash := map[string]RunSummary{r.Hash: r}
+	byRunName := map[string][]RunSummary{}
+
+	got := resolveInclude("e0e1e2e3e4e5e6e7e8e9eaeb", byExp, byHash, byRunName)
+	if got.Type != "hash" {
+		t.Fatalf("Type = %q, want %q", got.Type, "hash")
+	}
+	if got.Name != "e0e1e2e3e4e5e6e7e8e9eaeb" {
+		t.Errorf("Name = %q, want input hash as fallback", got.Name)
+	}
 }
 
 func TestResolveInclude_ExperimentName(t *testing.T) {
@@ -64,6 +91,11 @@ func TestResolveInclude_ExperimentName(t *testing.T) {
 	}
 	if len(got.Runs) != 2 {
 		t.Errorf("Runs len = %d, want 2", len(got.Runs))
+	}
+	// Experiment-shape includes display the experiment name itself
+	// (the input). v1.6.2 hash-name fix doesn't touch this branch.
+	if got.Name != "exp-A" {
+		t.Errorf("Name = %q, want %q (experiment name preserved)", got.Name, "exp-A")
 	}
 }
 
@@ -78,6 +110,12 @@ func TestResolveInclude_RunName_SingleMatch(t *testing.T) {
 	}
 	if len(got.Runs) != 1 {
 		t.Errorf("Runs len = %d, want 1", len(got.Runs))
+	}
+	// Run-name-shape includes display the run name itself (the input
+	// already matches the resolved Aim run.name). v1.6.2 hash-name
+	// fix doesn't touch this branch.
+	if got.Name != "latent-bert" {
+		t.Errorf("Name = %q, want %q (run name preserved)", got.Name, "latent-bert")
 	}
 }
 
