@@ -459,6 +459,16 @@ func resolveInclude(
 		if rs, ok := byHash[incName]; ok {
 			entry.Type = "hash"
 			entry.Runs = []string{rs.Hash}
+			// Surface the run's meaningful name to the frontend so the
+			// comparison panel chip reads "bert-tiny" instead of the
+			// 24-char hash. Without this, hash-resolved includes were
+			// the only resolved type whose display name was the input
+			// identifier (experiment + run-name include kinds use a
+			// human-readable input directly; hash inputs need the
+			// lookup to recover one).
+			if rs.Name != "" {
+				entry.Name = rs.Name
+			}
 			return entry
 		}
 		// Hash-shaped but not found — fall through to other resolvers
