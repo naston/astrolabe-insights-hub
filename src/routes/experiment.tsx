@@ -243,6 +243,18 @@ function ExperimentBody({
     return [...native, ...comparison.filter((c) => !native.find((n) => n.hash === c.hash))];
   }, [selectedVersion, comparison]);
 
+  // Same partitioning as `allRuns` but split — the stats table renders
+  // native runs and included-from-other-experiment runs as separate
+  // groups so a researcher can see at a glance which of the rows
+  // belong to *this* experiment vs which were pulled in for comparison.
+  // Drops anything already represented in the selected version (the
+  // chart's union does the same) so we don't double-count when a user
+  // re-includes a run that's already native to a non-selected version.
+  const includedRunsForTable = useMemo(() => {
+    const nativeHashes = new Set(selectedVersion?.runs.map((r) => r.hash) ?? []);
+    return comparison.filter((c) => !nativeHashes.has(c.hash));
+  }, [selectedVersion, comparison]);
+
   // Per-run metadata: active flag + creationMs (for wall-time x-axis) +
   // the version label so we can show "v3" alongside the run's identity.
   const runMeta = useMemo(() => {
@@ -717,12 +729,16 @@ function ExperimentBody({
               </div>
             )}
 
-            {/* Per-run stats — one row per run of the selected version, with
-                a metric + best/last selector so the headline column is
-                explicit (and "winner" gets a tinted row when best). */}
+            {/* Per-run stats — one row per run of the selected version, plus
+                a separate "Included" group for runs pulled in from other
+                experiments (via --include or the comparison modal). The
+                metric + best/last selector applies to both groups so a
+                researcher can see how an included run compares against
+                this experiment's runs at a glance. */}
             <RunStatsTable
               versionLabel={selectedVersion?.label}
               runs={selectedVersion?.runs ?? []}
+              includedRuns={includedRunsForTable}
               runColors={runColors}
               availableMetrics={metricNames}
               showSubmitterLines={showSubmitterLines}
@@ -796,6 +812,14 @@ function metricDirection(name: string): "min" | "max" {
  * (BERT, LatentBERT) with their respective metrics; switching the version
  * selector swaps which version's runs populate the table.
  *
+ * Cross-experiment runs that the user pulled in via ``--include`` or the
+ * comparison modal are rendered in a separate "Included" group below
+ * the native rows so a researcher can compare them against this
+ * experiment's runs without losing the visual distinction. Included
+ * rows display fewer columns by design — they don't have a duration or
+ * state in the parent experiment's frame, and forcing them through the
+ * native row renderer would just print "—" everywhere those columns sit.
+ *
  * The table's headline column is configurable: the user picks which metric
  * to show, and whether to display the **best** value (min or max depending
  * on the metric — losses minimize, scores maximize) or the **last** logged
@@ -805,12 +829,17 @@ function metricDirection(name: string): "min" | "max" {
 function RunStatsTable({
   versionLabel,
   runs,
+  includedRuns = [],
   runColors,
   availableMetrics,
   showSubmitterLines,
 }: {
   versionLabel: string | undefined;
   runs: Run[];
+  /** Runs pulled in from other experiments (via --include or the modal).
+   * Rendered as a separate group below the native rows. Defaults to []
+   * for callers that don't have any cross-experiment comparison runs. */
+  includedRuns?: ComparisonRunPick[];
   runColors: Record<string, string>;
   availableMetrics: string[];
   showSubmitterLines: boolean;
@@ -830,23 +859,29 @@ function RunStatsTable({
     }
   }, [availableMetrics, defaultMetric, metric]);
 
-  // Fetch the chosen metric for each run. Refreshes every 5s so active runs
-  // see updated values without burning the chart-poll cadence (2s) on the
-  // sidebar.
+  // Fetch the chosen metric for each run — both native and included.
+  // The two groups share one fetch loop so a re-render that adds an
+  // included run doesn't kick off a parallel poll cycle. Refreshes
+  // every 5s so active runs see updated values without burning the
+  // chart-poll cadence (2s) on the sidebar.
   const [series, setSeries] = useState<Record<string, MetricSeries | null>>({});
-  const runHashes = useMemo(() => runs.map((r) => r.hash).join(","), [runs]);
+  const allHashes = useMemo(
+    () => [...runs.map((r) => r.hash), ...includedRuns.map((r) => r.hash)],
+    [runs, includedRuns],
+  );
+  const allHashesKey = useMemo(() => allHashes.join(","), [allHashes]);
   useEffect(() => {
     let cancelled = false;
     const ctrl = new AbortController();
 
     async function fetchAll() {
       const entries = await Promise.all(
-        runs.map(async (r): Promise<[string, MetricSeries | null]> => {
+        allHashes.map(async (hash): Promise<[string, MetricSeries | null]> => {
           try {
-            const s = await api.metric(r.hash, metric, ctrl.signal);
-            return [r.hash, s];
+            const s = await api.metric(hash, metric, ctrl.signal);
+            return [hash, s];
           } catch {
-            return [r.hash, null];
+            return [hash, null];
           }
         }),
       );
@@ -861,27 +896,48 @@ function RunStatsTable({
       ctrl.abort();
       window.clearInterval(id);
     };
-  }, [runHashes, metric, runs]);
+  }, [allHashesKey, metric, allHashes]);
 
   const direction = metricDirection(metric);
   const computed = useMemo(() => {
     const out: Record<string, number | null> = {};
-    for (const r of runs) {
-      const s = series[r.hash];
+    for (const hash of allHashes) {
+      const s = series[hash];
       if (!s || s.values.length === 0) {
-        out[r.hash] = null;
+        out[hash] = null;
         continue;
       }
       if (measurement === "last") {
-        out[r.hash] = s.values[s.values.length - 1];
+        out[hash] = s.values[s.values.length - 1];
       } else {
-        out[r.hash] = direction === "min" ? Math.min(...s.values) : Math.max(...s.values);
+        out[hash] = direction === "min" ? Math.min(...s.values) : Math.max(...s.values);
       }
     }
     return out;
-  }, [series, runs, measurement, direction]);
+  }, [series, allHashes, measurement, direction]);
 
-  if (runs.length === 0) return null;
+  // Winner-row tinting works across the union (native + included) so the
+  // row that actually holds the best value gets the success tint, even
+  // if the included run wins. That matches the "which one won?" question
+  // researchers ask when they include a known-good baseline for comparison.
+  const winnerHash = useMemo(() => {
+    if (measurement !== "best") return null;
+    let bestHash: string | null = null;
+    let bestVal: number | null = null;
+    for (const [hash, val] of Object.entries(computed)) {
+      if (val == null) continue;
+      if (
+        bestVal == null ||
+        (direction === "min" ? val < bestVal : val > bestVal)
+      ) {
+        bestVal = val;
+        bestHash = hash;
+      }
+    }
+    return bestHash;
+  }, [computed, measurement, direction]);
+
+  if (runs.length === 0 && includedRuns.length === 0) return null;
 
   return (
     <div className="rounded-lg border border-border bg-card overflow-hidden">
@@ -958,14 +1014,7 @@ function RunStatsTable({
             {runs.map((r) => {
               const stateLabel = r.active ? "live" : r.end_time ? "done" : "—";
               const value = computed[r.hash];
-              // Highlight the row that holds the best value across all runs
-              // — quick "which one won?" cue when measurement = best.
-              const isWinner =
-                measurement === "best" &&
-                value != null &&
-                Object.values(computed)
-                  .filter((v): v is number => v != null)
-                  .every((other) => (direction === "min" ? value <= other : value >= other));
+              const isWinner = winnerHash === r.hash;
               return (
                 <tr
                   key={r.hash}
@@ -1015,6 +1064,79 @@ function RunStatsTable({
               );
             })}
           </tbody>
+          {includedRuns.length > 0 && (
+            <tbody className="divide-y divide-border">
+              <tr className="text-[10px] uppercase tracking-wider text-muted-foreground bg-muted/40 border-t border-border">
+                <td
+                  colSpan={5}
+                  className="text-left px-2 py-1 font-medium"
+                  title="Runs pulled in via --include or the comparison modal"
+                >
+                  Included <span className="opacity-60 normal-case">· from other experiments</span>
+                </td>
+              </tr>
+              {includedRuns.map((r) => {
+                  const value = computed[r.hash];
+                  const isWinner = winnerHash === r.hash;
+                  return (
+                    <tr
+                      key={r.hash}
+                      className={cn(
+                        "hover:bg-muted/50",
+                        isWinner && "bg-[color-mix(in_oklab,var(--success)_8%,transparent)]",
+                      )}
+                    >
+                      <td className="px-2 py-1.5 align-middle">
+                        <div className="flex flex-col gap-0.5 min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span
+                              className="h-1.5 w-1.5 rounded-sm shrink-0"
+                              style={{ backgroundColor: runColors[r.hash] ?? "#888" }}
+                            />
+                            <span className="text-foreground truncate">{r.name}</span>
+                            {showSubmitterLines && r.submitted_by && (
+                              <span className="text-[10px] text-muted-foreground shrink-0">
+                                by {r.submitted_by}
+                              </span>
+                            )}
+                          </div>
+                          {r.experiment && r.experiment !== r.name && (
+                            <span
+                              className="text-[10px] text-muted-foreground/80 truncate pl-3"
+                              title={`From experiment: ${r.experiment}`}
+                            >
+                              ↳ {r.experiment}
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-2 py-1.5 align-middle text-muted-foreground">
+                        <CopyableHash hash={r.hash} />
+                      </td>
+                      <td
+                        className={cn(
+                          "px-2 py-1.5 align-middle text-right text-tabular",
+                          isWinner && "text-[var(--success)] font-medium",
+                        )}
+                      >
+                        {value != null ? value.toFixed(4) : "—"}
+                      </td>
+                      {/* Duration + state aren't meaningful for an included run
+                          inside this experiment's frame — the run finished
+                          some other time, in some other state. Render dashes
+                          so the column structure stays consistent across the
+                          two groups. */}
+                      <td className="px-2 py-1.5 align-middle text-right text-tabular text-muted-foreground">
+                        —
+                      </td>
+                      <td className="px-2 py-1.5 align-middle text-right text-muted-foreground">
+                        —
+                      </td>
+                    </tr>
+                  );
+                })}
+            </tbody>
+          )}
         </table>
       </div>
     </div>
