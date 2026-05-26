@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/naston/astrolabe-insights-hub/server/api"
 )
@@ -49,6 +50,21 @@ func main() {
 	stateReader := api.NewStateReader(*stateDir)
 	handler := api.NewHandler(aimClient, stateReader, colors)
 
+	// Response caches. TTLs and bounds chosen per plans/dashboard-scaling.md:
+	//   - 2s on state-shaped endpoints (experiments list + per-experiment
+	//     runs list). Invisible relative to the 3s frontend poll cadence;
+	//     ~8.5× aim-api load reduction at 50 polling tabs. Unbounded —
+	//     the key space is small (single entry / one per experiment).
+	//   - 10s on metric series. Larger payloads, slower-changing, idle
+	//     during eval pauses. Bounded LRU at 1000 entries (≈30 MB worst
+	//     case at ~30 KB per metric series) so a long-running NUC with
+	//     many experiments × many metrics can't OOM the dashboard.
+	experimentsCache := api.NewTTLCache(2*time.Second, 0)
+	experimentRunsCache := api.NewTTLCache(2*time.Second, 0)
+	metricSeriesCache := api.NewTTLCache(10*time.Second, 1000)
+	cachedMetricData := metricSeriesCache.Middleware(handler.HandleMetricData)
+	cachedExperimentRuns := experimentRunsCache.Middleware(handler.HandleExperimentRuns)
+
 	// API routes
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/runs", handler.HandleRuns)
@@ -58,21 +74,21 @@ func main() {
 		case strings.HasSuffix(path, "/info"):
 			handler.HandleRunInfo(w, r)
 		case strings.Contains(path, "/metrics/"):
-			handler.HandleMetricData(w, r)
+			cachedMetricData(w, r)
 		case strings.HasSuffix(path, "/metrics"):
 			handler.HandleRunMetrics(w, r)
 		default:
 			http.NotFound(w, r)
 		}
 	})
-	mux.HandleFunc("/api/experiments", handler.HandleExperiments)
+	mux.HandleFunc("/api/experiments", experimentsCache.Middleware(handler.HandleExperiments))
 	mux.HandleFunc("/api/experiments/", func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		switch {
 		case strings.HasSuffix(path, "/includes"):
 			handler.HandleExperimentIncludes(w, r)
 		case strings.HasSuffix(path, "/runs"):
-			handler.HandleExperimentRuns(w, r)
+			cachedExperimentRuns(w, r)
 		default:
 			http.NotFound(w, r)
 		}
