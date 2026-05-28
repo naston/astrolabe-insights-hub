@@ -1,12 +1,13 @@
 import type {
   ColorsResponse,
+  CostResponse,
   Experiment,
   HealthResponse,
   IncludesResponse,
   MetricSeries,
   Run,
 } from "./types";
-import { seedColors, seedExperiments, seedIncludes, seedMetric, seedRuns } from "./seed-data";
+import { seedColors, seedCost, seedExperiments, seedIncludes, seedMetric, seedRuns } from "./seed-data";
 
 const BASE = "/api";
 
@@ -91,6 +92,47 @@ export const api = {
   colors: (signal?: AbortSignal) =>
     withSeed(() => getJSON<ColorsResponse>("/config/colors", signal), seedColors, signal),
   health: (signal?: AbortSignal) => getJSON<HealthResponse>("/health", signal),
+  /**
+   * Cost page payload. Query params drive every panel: ``window``
+   * (7d|30d|90d|all|custom), ``group_by`` (submitter|repo|gpu_type|outcome),
+   * and ``stack`` (the time-series stacking dimension; defaults to gpu_type
+   * on the backend).
+   *
+   * Seed fallback returns a deterministic 30d/submitter snapshot anchored
+   * to 2026-05-28 so layout work doesn't depend on a reachable Go API.
+   */
+  cost: (
+    params: { window?: string; group_by?: string; stack?: string },
+    signal?: AbortSignal,
+  ) =>
+    withSeed(
+      () => {
+        const qs = new URLSearchParams();
+        if (params.window) qs.set("window", params.window);
+        if (params.group_by) qs.set("group_by", params.group_by);
+        if (params.stack) qs.set("stack", params.stack);
+        const q = qs.toString();
+        return getJSON<CostResponse>(`/cost${q ? `?${q}` : ""}`, signal);
+      },
+      () =>
+        seedCost({
+          window: params.window,
+          group_by: params.group_by as
+            | "submitter"
+            | "repo"
+            | "gpu_type"
+            | "outcome"
+            | undefined,
+          stack: params.stack as
+            | "submitter"
+            | "repo"
+            | "gpu_type"
+            | "outcome"
+            | "none"
+            | undefined,
+        }),
+      signal,
+    ),
 };
 
 // Default Astrolabe palette — used when /api/config/colors is unavailable

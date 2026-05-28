@@ -121,3 +121,100 @@ export interface ColorsResponse {
 export interface HealthResponse {
   status: string;
 }
+
+// --- Cost API -------------------------------------------------------------
+//
+// The cost page renders from a single API call so the frontend never shows
+// a partially-consistent state (e.g., total + chart loaded but breakdown
+// still spinning). The window + group_by query params drive every panel.
+//
+// All money values are integer cents to dodge JS float weirdness at the
+// boundary; the frontend formats with the standard 2-decimal locale.
+
+export type CostWindowLabel = "7d" | "30d" | "90d" | "all" | "custom";
+
+export type CostGroupByDimension = "submitter" | "repo" | "gpu_type" | "outcome";
+
+export interface CostWindow {
+  start: string; // ISO-8601
+  end: string; // ISO-8601
+  label: CostWindowLabel;
+  /** Bucket size for the time-series chart — backend chooses based on window. */
+  bucket: "daily" | "weekly" | "monthly";
+}
+
+export interface CostTimeBucket {
+  /** Bucket start, ISO-8601 date. */
+  start: string;
+  total_cents: number;
+  /**
+   * Cents broken out by the chart's stacking dimension (GPU type by default).
+   * Backend mirrors whatever stacking the frontend requested via the
+   * ``stack`` query param; falls back to gpu_type if omitted.
+   */
+  by_dimension: Record<string, number>;
+}
+
+export interface CostBreakdownRow {
+  /** Grouping key (submitter username, repo URL, gpu_type, outcome name). */
+  key: string;
+  /** Submits = versions = compute acquisitions; NOT Aim run count. */
+  submits: number;
+  /** Hours billed across all submits in this group. */
+  hours: number;
+  cents: number;
+  /** Percent of the window's total cost, [0..100]. */
+  pct: number;
+}
+
+/**
+ * One experiment's place in the window. The cost page renders a multilevel
+ * table: experiment name appears once (rowspan), versions listed under it.
+ * Click a version row → that experiment's detail page (which stays cost-
+ * free by design).
+ */
+export interface CostExperimentEntry {
+  name: string;
+  /** Hours summed across versions (running ones excluded — they have null hours). */
+  total_hours: number;
+  total_cents: number;
+  versions: CostVersionEntry[];
+}
+
+export interface CostVersionEntry {
+  version: string; // "v1", "v2", ...
+  gpu_type: string;
+  state: ExperimentState;
+  outcome: ExperimentOutcome;
+  /**
+   * Null when the run is still in flight — the table renders a tilde +
+   * "[running]" pill in that case, using estimated_cents instead.
+   */
+  hours: number | null;
+  /** Final cents for terminal runs; null for in-flight (use estimated_cents). */
+  cents: number | null;
+  /** Pre-submit estimate (budget_hours × rate). Populated for every row. */
+  estimated_cents: number;
+}
+
+export interface CostResponse {
+  window: CostWindow;
+  /** Sum across all experiments in the window. */
+  total_cents: number;
+  /** Same metric for the prior matching window — drives the "↑ 17%" delta.
+   *  Backend-provided because the frontend doesn't have prior-window data
+   *  in the same response; computing it would require a second API call. */
+  prior_total_cents: number;
+  // Note: failed_cents is intentionally NOT in the response. The header's
+  // "of which $X on failed runs" line is derived on the frontend by
+  // summing experiments[*].versions[*].cents where outcome ∈
+  // {failed, stopped, timeout}. v1 doesn't paginate experiments so the
+  // derivation is exhaustive. If pagination ever lands, lift the
+  // computation to the backend then.
+  time_series: CostTimeBucket[];
+  breakdown: {
+    dimension: CostGroupByDimension;
+    rows: CostBreakdownRow[];
+  };
+  experiments: CostExperimentEntry[];
+}

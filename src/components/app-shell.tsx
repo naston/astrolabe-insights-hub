@@ -24,6 +24,15 @@ export function AppShell({ children, rightSlot }: Props) {
             <Telescope className="h-4 w-4 text-primary" strokeWidth={2.25} />
             <span>Astrolabe</span>
           </Link>
+          <nav className="flex items-center gap-1 text-sm">
+            <Link
+              to="/cost"
+              className="rounded-md px-2 py-1 text-muted-foreground hover:text-foreground hover:bg-accent/40 transition-colors"
+              activeProps={{ className: "rounded-md px-2 py-1 text-foreground bg-accent/40" }}
+            >
+              Cost
+            </Link>
+          </nav>
           <div className="ml-auto flex items-center gap-2">
             {rightSlot}
             <button
