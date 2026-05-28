@@ -159,6 +159,15 @@ type AstrolabeTags struct {
 	// SubmittedBy was added in v1.2.1; legacy runs have it empty and
 	// the dashboard's filter dropdown surfaces them as "unknown".
 	SubmittedBy string
+	// GPUType / GPURateCentsPerHour / Outcome were added in v1.7.4 so
+	// the cost page can derive per-version spend directly from Aim
+	// instead of the state file (which is last-write-wins per
+	// experiment, so older versions lose their data). All three are
+	// empty/nil for runs that predate v1.7.4; the cost handler runs
+	// a fallback rate lookup for those.
+	GPUType             string
+	GPURateCentsPerHour *int
+	Outcome             string
 }
 
 // AstrolabeTagsFromParams extracts the astrolabe.* tags the
@@ -179,11 +188,18 @@ func AstrolabeTagsFromParams(params map[string]interface{}) AstrolabeTags {
 		SubmitID:       stringFromAny(params["astrolabe.submit_id"]),
 		ExperimentName: stringFromAny(params["astrolabe.experiment"]),
 		SubmittedBy:    stringFromAny(params["astrolabe.user"]),
+		GPUType:        stringFromAny(params["astrolabe.gpu_type"]),
+		Outcome:        stringFromAny(params["astrolabe.outcome"]),
+	}
+	if r := intFromAny(params["astrolabe.gpu_rate_cents_per_hour"]); r != nil {
+		tags.GPURateCentsPerHour = r
 	}
 
 	// Nested layout — fall back if any key is empty above.
 	if tags.Version == "" || tags.SubmitID == "" ||
-		tags.ExperimentName == "" || tags.SubmittedBy == "" {
+		tags.ExperimentName == "" || tags.SubmittedBy == "" ||
+		tags.GPUType == "" || tags.Outcome == "" ||
+		tags.GPURateCentsPerHour == nil {
 		if nested, ok := params["astrolabe"].(map[string]interface{}); ok {
 			if tags.Version == "" {
 				tags.Version = stringFromAny(nested["version"])
@@ -196,6 +212,17 @@ func AstrolabeTagsFromParams(params map[string]interface{}) AstrolabeTags {
 			}
 			if tags.SubmittedBy == "" {
 				tags.SubmittedBy = stringFromAny(nested["user"])
+			}
+			if tags.GPUType == "" {
+				tags.GPUType = stringFromAny(nested["gpu_type"])
+			}
+			if tags.Outcome == "" {
+				tags.Outcome = stringFromAny(nested["outcome"])
+			}
+			if tags.GPURateCentsPerHour == nil {
+				if r := intFromAny(nested["gpu_rate_cents_per_hour"]); r != nil {
+					tags.GPURateCentsPerHour = r
+				}
 			}
 		}
 	}
@@ -210,6 +237,32 @@ func stringFromAny(v interface{}) string {
 		return s
 	}
 	return ""
+}
+
+// intFromAny extracts an integer from a tag value, accepting either
+// JSON numbers (Aim stores small ints as float64 after json.Unmarshal)
+// or string-encoded ints (the engine writes the rate as a string into
+// AIM_RUN_TAGS, and the callback may preserve that shape).
+func intFromAny(v interface{}) *int {
+	if v == nil {
+		return nil
+	}
+	switch x := v.(type) {
+	case float64:
+		i := int(x)
+		return &i
+	case int:
+		return &x
+	case string:
+		if x == "" {
+			return nil
+		}
+		var i int
+		if _, err := fmt.Sscanf(x, "%d", &i); err == nil {
+			return &i
+		}
+	}
+	return nil
 }
 
 // GetMetric fetches metric data (step/value pairs) for a run.

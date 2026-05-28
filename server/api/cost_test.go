@@ -3,39 +3,149 @@ package api
 // Tests for the cost handler. Contract under test (per
 // astrolabe-insights-hub/src/lib/types.ts):
 //
-//   - Empty state dir → response has empty arrays, no panic
-//   - Window filter excludes records outside the range
-//   - Records with no GPURateCentsPerHour contribute 0 cents (rendered
-//     as "—" by the frontend); they still count in submits/hours
-//   - Local backend (rate=0) shows up in submits but contributes 0 to
-//     totals and 0 cents to the breakdown row
-//   - Group-by dimension is honored (submitter / repo / gpu_type /
-//     outcome / backend)
-//   - Stack dimension is honored in the time series; "none" funnels
+//   - No Aim runs → response has empty arrays, no panic
+//   - Run outside the window → excluded
+//   - Run with no rate (no astrolabe.gpu_rate_cents_per_hour tag AND
+//     no state-file fallback) → version cents=nil, total=0, but the
+//     run still counts in submits/hours
+//   - Local backend (rate=0 tag) → submits=1, cents contribution=0
+//   - Multi-submitter window → totals/percentages add up; biggest first
+//   - group_by dimension is honored
+//   - stack dimension is honored in the time series; "none" funnels
 //     into a single "all" key
-//   - Outcome normalization: timeout / stopped / failure → "failed";
-//     success → "success"; pre-terminal states → no outcome
+//   - Outcome tag dispatches to "success" / "failed" buckets
 //   - prior_total_cents is 0 for window=all
-//   - prior_total_cents is non-zero for finite windows with prior data
-//   - Legacy gpu_type aliases are recognized (visible via stackKey but
-//     don't auto-recover rates — that's a backfill responsibility)
+//   - Multiple versions of the same experiment surface as multiple
+//     CostVersionEntry rows under one CostExperimentEntry
+//   - Pre-v1.7.4 runs (missing rate tag) pick up rates from state
+//     files when the experiment's gpu_type matches
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
 
-// --- Fixtures ---------------------------------------------------------------
+// --- Fake Aim --------------------------------------------------------------
 
-func tmpStateDir(t *testing.T) string {
+// fakeRun describes one Aim run for the fake server. Tag map keys
+// should use the dotted form ("astrolabe.version") to mirror what the
+// callback writes; the handler also accepts the nested form but the
+// dotted form is the production layout.
+type fakeRun struct {
+	experiment   string  // Aim experiment name
+	hash         string
+	creationTime float64 // unix seconds; 0 means missing
+	endTime      float64 // 0 means in-flight
+	tags         map[string]any
+}
+
+// fakeAim spins up an httptest.Server that mimics the three Aim REST
+// endpoints the cost handler hits: list experiments, list runs per
+// experiment, get run info (for params/tags). The returned client
+// points at the server; t.Cleanup tears it down.
+func fakeAim(t *testing.T, runs []fakeRun) *AimClient {
 	t.Helper()
-	dir := t.TempDir()
-	return dir
+
+	// Bucket runs by experiment, assigning stable IDs.
+	byExp := map[string][]fakeRun{}
+	for _, r := range runs {
+		byExp[r.experiment] = append(byExp[r.experiment], r)
+	}
+	expIDs := map[string]string{}
+	i := 0
+	for name := range byExp {
+		expIDs[name] = fmt.Sprintf("exp-%d", i)
+		i++
+	}
+	idToName := map[string]string{}
+	for name, id := range expIDs {
+		idToName[id] = name
+	}
+
+	// One dispatcher handles all three routes. Using net/http's default
+	// pattern matcher here is fiddly (overlapping /api/experiments/
+	// prefixes), so we just inspect the path ourselves.
+	dispatch := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		switch {
+		case path == "/api/experiments/" || path == "/api/experiments":
+			out := make([]Experiment, 0, len(expIDs))
+			for name, id := range expIDs {
+				out = append(out, Experiment{
+					ID:       id,
+					Name:     name,
+					RunCount: len(byExp[name]),
+				})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(out)
+
+		case strings.HasPrefix(path, "/api/experiments/") && strings.HasSuffix(path, "/runs/"):
+			id := strings.TrimSuffix(strings.TrimPrefix(path, "/api/experiments/"), "/runs/")
+			name, ok := idToName[id]
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			runs := byExp[name]
+			out := ExperimentRuns{ID: id}
+			for _, fr := range runs {
+				out.Runs = append(out.Runs, AimRun{
+					RunID:        fr.hash,
+					Name:         fr.hash,
+					CreationTime: fr.creationTime,
+					EndTime:      fr.endTime,
+				})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(out)
+
+		case strings.HasPrefix(path, "/api/runs/"):
+			rest := strings.TrimPrefix(path, "/api/runs/")
+			parts := strings.Split(rest, "/")
+			if len(parts) < 2 || parts[1] != "info" {
+				http.NotFound(w, r)
+				return
+			}
+			hash := parts[0]
+			for _, list := range byExp {
+				for _, fr := range list {
+					if fr.hash == hash {
+						w.Header().Set("Content-Type", "application/json")
+						_ = json.NewEncoder(w).Encode(RunInfo{Params: fr.tags})
+						return
+					}
+				}
+			}
+			http.NotFound(w, r)
+
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := httptest.NewServer(dispatch)
+	t.Cleanup(srv.Close)
+	return NewAimClient(srv.URL)
+}
+
+// makeHandlerWithAim wires a handler with the given AimClient and a
+// state-dir-backed StateReader. Both may be nil where not needed.
+func makeHandlerWithAim(t *testing.T, aim *AimClient, stateDir string) *Handler {
+	t.Helper()
+	var sr *StateReader
+	if stateDir != "" {
+		sr = NewStateReader(stateDir)
+	}
+	return NewHandler(aim, sr, nil)
 }
 
 func writeState(t *testing.T, dir, name string, body map[string]any) {
@@ -50,15 +160,6 @@ func writeState(t *testing.T, dir, name string, body map[string]any) {
 	}
 }
 
-// makeHandler builds a Handler with a StateReader pointing at dir.
-// AimClient is nil — the cost endpoint doesn't touch Aim in v1.
-func makeHandler(dir string) *Handler {
-	return NewHandler(nil, NewStateReader(dir), nil)
-}
-
-func intPtr(v int) *int     { return &v }
-
-// callCost makes an HTTP-style call to HandleCost and decodes the result.
 func callCost(t *testing.T, h *Handler, query string) CostResponse {
 	t.Helper()
 	req := httptest.NewRequest("GET", "/api/cost?"+query, nil)
@@ -74,12 +175,39 @@ func callCost(t *testing.T, h *Handler, query string) CostResponse {
 	return resp
 }
 
-// --- Edge cases first ------------------------------------------------------
+// unixSecs returns the Unix-seconds float representation of a time —
+// matches Aim's serialization.
+func unixSecs(t time.Time) float64 {
+	return float64(t.Unix()) + float64(t.Nanosecond())/1e9
+}
 
-func TestHandleCostEmptyDir(t *testing.T) {
-	// No state files → response is well-formed but empty. Frontend
-	// renders "No spend in window".
-	h := makeHandler(tmpStateDir(t))
+func tagSet(experiment, version, submitID, user, gpuType, outcome string, rate *int) map[string]any {
+	m := map[string]any{
+		"astrolabe.experiment": experiment,
+		"astrolabe.version":    version,
+		"astrolabe.submit_id":  submitID,
+	}
+	if user != "" {
+		m["astrolabe.user"] = user
+	}
+	if gpuType != "" {
+		m["astrolabe.gpu_type"] = gpuType
+	}
+	if outcome != "" {
+		m["astrolabe.outcome"] = outcome
+	}
+	if rate != nil {
+		m["astrolabe.gpu_rate_cents_per_hour"] = fmt.Sprintf("%d", *rate)
+	}
+	return m
+}
+
+func intPtr(v int) *int { return &v }
+
+// --- Edge cases ------------------------------------------------------------
+
+func TestHandleCostEmptyAim(t *testing.T) {
+	h := makeHandlerWithAim(t, fakeAim(t, nil), "")
 	resp := callCost(t, h, "window=30d")
 	if resp.TotalCents != 0 {
 		t.Fatalf("expected 0 total, got %d", resp.TotalCents)
@@ -92,78 +220,76 @@ func TestHandleCostEmptyDir(t *testing.T) {
 	}
 }
 
-func TestRecordOutsideWindowExcluded(t *testing.T) {
-	dir := tmpStateDir(t)
-	// Run that ended 60 days ago — outside the 30d window.
-	old := time.Now().UTC().AddDate(0, 0, -60).Format(time.RFC3339)
-	writeState(t, dir, "old-run", map[string]any{
-		"state":                    "COMPLETED",
-		"gpu_type":                 "gpu_8x_a100",
-		"backend":                  "lambda",
-		"submitted_by":             "alice",
-		"started_at":               old,
-		"finished_at":              time.Now().UTC().AddDate(0, 0, -59).Format(time.RFC3339),
-		"gpu_rate_cents_per_hour":  1592,
-	})
-	resp := callCost(t, makeHandler(dir), "window=30d")
+func TestHandleCostNilAim(t *testing.T) {
+	// nil AimClient → still returns an empty, well-shaped response.
+	// Mirrors the deploy state on a brand-new NUC where aim isn't
+	// configured yet; the dashboard shouldn't 5xx in that state.
+	h := makeHandlerWithAim(t, nil, "")
+	resp := callCost(t, h, "window=30d")
+	if resp.TotalCents != 0 {
+		t.Fatalf("expected 0 total, got %d", resp.TotalCents)
+	}
+}
+
+func TestRunOutsideWindowExcluded(t *testing.T) {
+	old := time.Now().UTC().AddDate(0, 0, -60)
+	aim := fakeAim(t, []fakeRun{{
+		experiment:   "old-run",
+		hash:         "abc",
+		creationTime: unixSecs(old),
+		endTime:      unixSecs(old.Add(time.Hour)),
+		tags:         tagSet("old-run", "v1", "s1", "alice", "gpu_8x_a100", "success", intPtr(1592)),
+	}})
+	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d")
 	if len(resp.Experiments) != 0 {
 		t.Fatalf("expected 0 experiments in window, got %d", len(resp.Experiments))
 	}
 }
 
-func TestRecordWithoutRateContributesZeroCents(t *testing.T) {
-	// A pre-backfill record (no gpu_rate_cents_per_hour) still
-	// appears in the experiments list but with cents=nil/0.
-	dir := tmpStateDir(t)
-	startedAt := time.Now().UTC().AddDate(0, 0, -5)
-	finishedAt := startedAt.Add(time.Hour)
-	writeState(t, dir, "no-rate", map[string]any{
-		"state":        "COMPLETED",
-		"gpu_type":     "gpu_8x_a100",
-		"backend":      "lambda",
-		"submitted_by": "alice",
-		"started_at":   startedAt.Format(time.RFC3339),
-		"finished_at":  finishedAt.Format(time.RFC3339),
-		// No gpu_rate_cents_per_hour — pre-backfill.
-	})
-	resp := callCost(t, makeHandler(dir), "window=30d")
+func TestRunWithoutRateAndNoFallbackContributesNil(t *testing.T) {
+	// No rate tag on the Aim run AND no state file to back-fill from.
+	// Frontend renders "—" via cents=nil; the version still surfaces.
+	start := time.Now().UTC().AddDate(0, 0, -5)
+	aim := fakeAim(t, []fakeRun{{
+		experiment:   "no-rate",
+		hash:         "abc",
+		creationTime: unixSecs(start),
+		endTime:      unixSecs(start.Add(time.Hour)),
+		tags:         tagSet("no-rate", "v1", "s1", "alice", "gpu_unknown", "success", nil),
+	}})
+	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d")
 	if len(resp.Experiments) != 1 {
 		t.Fatalf("expected 1 experiment, got %d", len(resp.Experiments))
 	}
 	exp := resp.Experiments[0]
 	if exp.TotalCents != 0 {
-		t.Fatalf("no-rate record should have 0 cents, got %d", exp.TotalCents)
+		t.Fatalf("no-rate run should have 0 cents, got %d", exp.TotalCents)
 	}
 	if len(exp.Versions) != 1 {
 		t.Fatalf("expected 1 version row, got %d", len(exp.Versions))
 	}
 	if exp.Versions[0].Cents != nil {
-		t.Fatalf("no-rate record should have nil Cents (renders '—'), got %v", *exp.Versions[0].Cents)
+		t.Fatalf("no-rate version should have nil Cents (renders '—'), got %v", *exp.Versions[0].Cents)
 	}
-	// Still counted in submits/hours via the breakdown.
 	if resp.TotalCents != 0 {
 		t.Fatalf("total should be 0, got %d", resp.TotalCents)
 	}
 }
 
 func TestLocalBackendZeroRateZeroContribution(t *testing.T) {
-	dir := tmpStateDir(t)
-	startedAt := time.Now().UTC().AddDate(0, 0, -2)
-	finishedAt := startedAt.Add(30 * time.Minute)
-	writeState(t, dir, "local-smoke", map[string]any{
-		"state":                   "COMPLETED",
-		"gpu_type":                "local",
-		"backend":                 "local",
-		"submitted_by":            "alice",
-		"started_at":              startedAt.Format(time.RFC3339),
-		"finished_at":             finishedAt.Format(time.RFC3339),
-		"gpu_rate_cents_per_hour": 0, // local is free
-	})
-	resp := callCost(t, makeHandler(dir), "window=30d")
+	start := time.Now().UTC().AddDate(0, 0, -2)
+	zero := 0
+	aim := fakeAim(t, []fakeRun{{
+		experiment:   "local-smoke",
+		hash:         "abc",
+		creationTime: unixSecs(start),
+		endTime:      unixSecs(start.Add(30 * time.Minute)),
+		tags:         tagSet("local-smoke", "v1", "s1", "alice", "local", "success", &zero),
+	}})
+	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d")
 	if resp.TotalCents != 0 {
 		t.Fatalf("local backend should contribute 0 to total, got %d", resp.TotalCents)
 	}
-	// But the breakdown row exists (submitter=alice).
 	if len(resp.Breakdown.Rows) != 1 {
 		t.Fatalf("expected 1 breakdown row, got %d", len(resp.Breakdown.Rows))
 	}
@@ -172,45 +298,38 @@ func TestLocalBackendZeroRateZeroContribution(t *testing.T) {
 	}
 }
 
-// --- Happy path / sanity ---------------------------------------------------
+// --- Happy path ------------------------------------------------------------
 
 func TestTotalAndPercentages(t *testing.T) {
-	dir := tmpStateDir(t)
-	// 2-hour run on 8xA100 at $15.92/hr = $31.84 = 3184 cents
 	start1 := time.Now().UTC().AddDate(0, 0, -3)
-	writeState(t, dir, "run-a", map[string]any{
-		"state":                   "COMPLETED",
-		"gpu_type":                "gpu_8x_a100",
-		"backend":                 "lambda",
-		"submitted_by":            "alice",
-		"started_at":              start1.Format(time.RFC3339),
-		"finished_at":             start1.Add(2 * time.Hour).Format(time.RFC3339),
-		"gpu_rate_cents_per_hour": 1592,
-	})
-	// 1-hour run by bob at the same rate = $15.92 = 1592 cents
 	start2 := time.Now().UTC().AddDate(0, 0, -2)
-	writeState(t, dir, "run-b", map[string]any{
-		"state":                   "COMPLETED",
-		"gpu_type":                "gpu_8x_a100",
-		"backend":                 "lambda",
-		"submitted_by":            "bob",
-		"started_at":              start2.Format(time.RFC3339),
-		"finished_at":             start2.Add(time.Hour).Format(time.RFC3339),
-		"gpu_rate_cents_per_hour": 1592,
+	aim := fakeAim(t, []fakeRun{
+		{
+			experiment:   "run-a",
+			hash:         "h1",
+			creationTime: unixSecs(start1),
+			endTime:      unixSecs(start1.Add(2 * time.Hour)),
+			tags:         tagSet("run-a", "v1", "s1", "alice", "gpu_8x_a100", "success", intPtr(1592)),
+		},
+		{
+			experiment:   "run-b",
+			hash:         "h2",
+			creationTime: unixSecs(start2),
+			endTime:      unixSecs(start2.Add(time.Hour)),
+			tags:         tagSet("run-b", "v1", "s2", "bob", "gpu_8x_a100", "success", intPtr(1592)),
+		},
 	})
-	resp := callCost(t, makeHandler(dir), "window=30d&group_by=submitter")
+	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d&group_by=submitter")
 	wantTotal := 3184 + 1592
 	if resp.TotalCents != wantTotal {
 		t.Fatalf("total: want %d, got %d", wantTotal, resp.TotalCents)
 	}
-	// Two breakdown rows, sorted by cents desc.
 	if len(resp.Breakdown.Rows) != 2 {
 		t.Fatalf("expected 2 breakdown rows, got %d", len(resp.Breakdown.Rows))
 	}
 	if resp.Breakdown.Rows[0].Key != "alice" {
 		t.Fatalf("biggest spender should be first; got %q", resp.Breakdown.Rows[0].Key)
 	}
-	// Percentages roughly 66.7 and 33.3 — allow 0.5% tolerance.
 	got := resp.Breakdown.Rows[0].Pct
 	if got < 66.0 || got > 67.5 {
 		t.Fatalf("alice pct: want ~66.7, got %.2f", got)
@@ -218,21 +337,24 @@ func TestTotalAndPercentages(t *testing.T) {
 }
 
 func TestGroupByDimensionRespected(t *testing.T) {
-	dir := tmpStateDir(t)
-	startedAt := time.Now().UTC().AddDate(0, 0, -2).Format(time.RFC3339)
-	finishedAt := time.Now().UTC().AddDate(0, 0, -2).Add(time.Hour).Format(time.RFC3339)
-	writeState(t, dir, "a", map[string]any{
-		"state": "COMPLETED", "gpu_type": "gpu_8x_a100", "backend": "lambda",
-		"submitted_by": "alice", "started_at": startedAt, "finished_at": finishedAt,
-		"gpu_rate_cents_per_hour": 1592,
+	start := time.Now().UTC().AddDate(0, 0, -2)
+	aim := fakeAim(t, []fakeRun{
+		{
+			experiment:   "a",
+			hash:         "h1",
+			creationTime: unixSecs(start),
+			endTime:      unixSecs(start.Add(time.Hour)),
+			tags:         tagSet("a", "v1", "s1", "alice", "gpu_8x_a100", "success", intPtr(1592)),
+		},
+		{
+			experiment:   "b",
+			hash:         "h2",
+			creationTime: unixSecs(start),
+			endTime:      unixSecs(start.Add(time.Hour)),
+			tags:         tagSet("b", "v1", "s2", "alice", "gpu_1x_a10", "success", intPtr(129)),
+		},
 	})
-	writeState(t, dir, "b", map[string]any{
-		"state": "COMPLETED", "gpu_type": "gpu_1x_a10", "backend": "lambda",
-		"submitted_by": "alice", "started_at": startedAt, "finished_at": finishedAt,
-		"gpu_rate_cents_per_hour": 129,
-	})
-	// Group by gpu_type: two rows (different gpus, same user).
-	resp := callCost(t, makeHandler(dir), "window=30d&group_by=gpu_type")
+	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d&group_by=gpu_type")
 	if resp.Breakdown.Dimension != "gpu_type" {
 		t.Fatalf("expected dimension gpu_type, got %q", resp.Breakdown.Dimension)
 	}
@@ -242,16 +364,15 @@ func TestGroupByDimensionRespected(t *testing.T) {
 }
 
 func TestStackByNoneFunnelsToAll(t *testing.T) {
-	dir := tmpStateDir(t)
-	startedAt := time.Now().UTC().AddDate(0, 0, -2).Format(time.RFC3339)
-	finishedAt := time.Now().UTC().AddDate(0, 0, -2).Add(time.Hour).Format(time.RFC3339)
-	writeState(t, dir, "a", map[string]any{
-		"state": "COMPLETED", "gpu_type": "gpu_8x_a100", "backend": "lambda",
-		"submitted_by": "alice", "started_at": startedAt, "finished_at": finishedAt,
-		"gpu_rate_cents_per_hour": 1592,
-	})
-	resp := callCost(t, makeHandler(dir), "window=30d&stack=none")
-	// Find the day with the experiment and confirm the bucket keys.
+	start := time.Now().UTC().AddDate(0, 0, -2)
+	aim := fakeAim(t, []fakeRun{{
+		experiment:   "a",
+		hash:         "h1",
+		creationTime: unixSecs(start),
+		endTime:      unixSecs(start.Add(time.Hour)),
+		tags:         tagSet("a", "v1", "s1", "alice", "gpu_8x_a100", "success", intPtr(1592)),
+	}})
+	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d&stack=none")
 	for _, b := range resp.TimeSeries {
 		if b.TotalCents > 0 {
 			if _, ok := b.ByDimension["all"]; !ok {
@@ -264,20 +385,24 @@ func TestStackByNoneFunnelsToAll(t *testing.T) {
 }
 
 func TestStackByGPUTypeProducesDistinctKeys(t *testing.T) {
-	dir := tmpStateDir(t)
-	startedAt := time.Now().UTC().AddDate(0, 0, -2).Format(time.RFC3339)
-	finishedAt := time.Now().UTC().AddDate(0, 0, -2).Add(time.Hour).Format(time.RFC3339)
-	writeState(t, dir, "a", map[string]any{
-		"state": "COMPLETED", "gpu_type": "gpu_8x_a100", "backend": "lambda",
-		"submitted_by": "alice", "started_at": startedAt, "finished_at": finishedAt,
-		"gpu_rate_cents_per_hour": 1592,
+	start := time.Now().UTC().AddDate(0, 0, -2)
+	aim := fakeAim(t, []fakeRun{
+		{
+			experiment:   "a",
+			hash:         "h1",
+			creationTime: unixSecs(start),
+			endTime:      unixSecs(start.Add(time.Hour)),
+			tags:         tagSet("a", "v1", "s1", "alice", "gpu_8x_a100", "success", intPtr(1592)),
+		},
+		{
+			experiment:   "b",
+			hash:         "h2",
+			creationTime: unixSecs(start),
+			endTime:      unixSecs(start.Add(time.Hour)),
+			tags:         tagSet("b", "v1", "s2", "alice", "gpu_1x_a10", "success", intPtr(129)),
+		},
 	})
-	writeState(t, dir, "b", map[string]any{
-		"state": "COMPLETED", "gpu_type": "gpu_1x_a10", "backend": "lambda",
-		"submitted_by": "alice", "started_at": startedAt, "finished_at": finishedAt,
-		"gpu_rate_cents_per_hour": 129,
-	})
-	resp := callCost(t, makeHandler(dir), "window=30d&stack=gpu_type")
+	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d&stack=gpu_type")
 	for _, b := range resp.TimeSeries {
 		if b.TotalCents > 0 {
 			if len(b.ByDimension) < 2 {
@@ -290,30 +415,27 @@ func TestStackByGPUTypeProducesDistinctKeys(t *testing.T) {
 }
 
 func TestOutcomeNormalization(t *testing.T) {
-	dir := tmpStateDir(t)
+	start := time.Now().UTC().AddDate(0, 0, -2)
 	cases := []struct {
 		name    string
 		outcome string
-		state   string
-		want    string // expected stackKey for outcome dim
 	}{
-		{"ok", "success", "COMPLETED", "success"},
-		{"timeout", "timeout", "FAILED", "failed"},
-		{"stopped", "stopped", "FAILED", "failed"},
-		{"failure", "failure", "FAILED", "failed"},
+		{"ok", "success"},
+		{"timeout", "timeout"},
+		{"stopped", "stopped"},
+		{"failure", "failure"},
 	}
-	startedAt := time.Now().UTC().AddDate(0, 0, -2).Format(time.RFC3339)
-	finishedAt := time.Now().UTC().AddDate(0, 0, -2).Add(time.Hour).Format(time.RFC3339)
+	var runs []fakeRun
 	for i, c := range cases {
-		writeState(t, dir, c.name+strconv.Itoa(i), map[string]any{
-			"state": c.state, "gpu_type": "gpu_8x_a100", "backend": "lambda",
-			"submitted_by": "alice", "started_at": startedAt, "finished_at": finishedAt,
-			"gpu_rate_cents_per_hour": 1592,
-			"outcome":                 c.outcome,
+		runs = append(runs, fakeRun{
+			experiment:   c.name + fmt.Sprintf("%d", i),
+			hash:         fmt.Sprintf("h%d", i),
+			creationTime: unixSecs(start),
+			endTime:      unixSecs(start.Add(time.Hour)),
+			tags:         tagSet(c.name+fmt.Sprintf("%d", i), "v1", fmt.Sprintf("s%d", i), "alice", "gpu_8x_a100", c.outcome, intPtr(1592)),
 		})
 	}
-	resp := callCost(t, makeHandler(dir), "window=30d&group_by=outcome")
-	// Expected keys: "success" (1) and "failed" (3).
+	resp := callCost(t, makeHandlerWithAim(t, fakeAim(t, runs), ""), "window=30d&group_by=outcome")
 	keys := map[string]int{}
 	for _, r := range resp.Breakdown.Rows {
 		keys[r.Key] = r.Submits
@@ -324,15 +446,15 @@ func TestOutcomeNormalization(t *testing.T) {
 }
 
 func TestPriorTotalSuppressedOnAllWindow(t *testing.T) {
-	dir := tmpStateDir(t)
-	startedAt := time.Now().UTC().AddDate(0, 0, -2).Format(time.RFC3339)
-	finishedAt := time.Now().UTC().AddDate(0, 0, -2).Add(time.Hour).Format(time.RFC3339)
-	writeState(t, dir, "a", map[string]any{
-		"state": "COMPLETED", "gpu_type": "gpu_8x_a100", "backend": "lambda",
-		"submitted_by": "alice", "started_at": startedAt, "finished_at": finishedAt,
-		"gpu_rate_cents_per_hour": 1592,
-	})
-	resp := callCost(t, makeHandler(dir), "window=all")
+	start := time.Now().UTC().AddDate(0, 0, -2)
+	aim := fakeAim(t, []fakeRun{{
+		experiment:   "a",
+		hash:         "h1",
+		creationTime: unixSecs(start),
+		endTime:      unixSecs(start.Add(time.Hour)),
+		tags:         tagSet("a", "v1", "s1", "alice", "gpu_8x_a100", "success", intPtr(1592)),
+	}})
+	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=all")
 	if resp.PriorTotalCents != 0 {
 		t.Fatalf("prior_total_cents must be 0 for 'all' window, got %d", resp.PriorTotalCents)
 	}
@@ -340,3 +462,86 @@ func TestPriorTotalSuppressedOnAllWindow(t *testing.T) {
 		t.Fatalf("expected label all, got %q", resp.Window.Label)
 	}
 }
+
+// --- v1.7.4-specific: per-version + legacy rate fallback -------------------
+
+func TestMultipleVersionsOfSameExperiment(t *testing.T) {
+	// Same astrolabe.experiment, different astrolabe.version → one
+	// CostExperimentEntry with two version rows. This is the bug
+	// v1.7.4 fixes: pre-fix the state file overwrote v1 with v2 and
+	// the cost page silently underreported spend.
+	start1 := time.Now().UTC().AddDate(0, 0, -5)
+	start2 := time.Now().UTC().AddDate(0, 0, -2)
+	aim := fakeAim(t, []fakeRun{
+		{
+			experiment:   "exp1",
+			hash:         "h1",
+			creationTime: unixSecs(start1),
+			endTime:      unixSecs(start1.Add(2 * time.Hour)),
+			tags:         tagSet("exp1", "v1", "s1", "alice", "gpu_8x_a100", "failure", intPtr(1592)),
+		},
+		{
+			experiment:   "exp1",
+			hash:         "h2",
+			creationTime: unixSecs(start2),
+			endTime:      unixSecs(start2.Add(time.Hour)),
+			tags:         tagSet("exp1", "v2", "s2", "alice", "gpu_8x_a100", "success", intPtr(1592)),
+		},
+	})
+	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d")
+	if len(resp.Experiments) != 1 {
+		t.Fatalf("expected 1 experiment, got %d", len(resp.Experiments))
+	}
+	exp := resp.Experiments[0]
+	if len(exp.Versions) != 2 {
+		t.Fatalf("expected 2 versions, got %d", len(exp.Versions))
+	}
+	// Both versions accounted for: 2h@$15.92 + 1h@$15.92 = $47.76 = 4776
+	if exp.TotalCents != 4776 {
+		t.Fatalf("total cents: want 4776, got %d", exp.TotalCents)
+	}
+	// Versions sorted by label (v1, v2).
+	if exp.Versions[0].Version != "v1" || exp.Versions[1].Version != "v2" {
+		t.Fatalf("versions not sorted: %q, %q", exp.Versions[0].Version, exp.Versions[1].Version)
+	}
+	// Outcome preserved per version.
+	if exp.Versions[0].Outcome != "failure" {
+		t.Fatalf("v1 outcome: want failure, got %q", exp.Versions[0].Outcome)
+	}
+	if exp.Versions[1].Outcome != "success" {
+		t.Fatalf("v2 outcome: want success, got %q", exp.Versions[1].Outcome)
+	}
+}
+
+func TestLegacyRunPicksUpRateFromStateFile(t *testing.T) {
+	// Aim run lacks astrolabe.gpu_rate_cents_per_hour (pre-v1.7.4).
+	// State file has the rate persisted from the backfill walker.
+	// Handler should join by gpu_type to recover the rate.
+	dir := t.TempDir()
+	writeState(t, dir, "legacy", map[string]any{
+		"state":                   "COMPLETED",
+		"gpu_type":                "gpu_8x_a100",
+		"backend":                 "lambda",
+		"submitted_by":            "alice",
+		"started_at":              time.Now().UTC().AddDate(0, 0, -2).Format(time.RFC3339),
+		"finished_at":             time.Now().UTC().AddDate(0, 0, -2).Add(time.Hour).Format(time.RFC3339),
+		"gpu_rate_cents_per_hour": 1592,
+	})
+	start := time.Now().UTC().AddDate(0, 0, -2)
+	aim := fakeAim(t, []fakeRun{{
+		experiment:   "legacy",
+		hash:         "h1",
+		creationTime: unixSecs(start),
+		endTime:      unixSecs(start.Add(time.Hour)),
+		// No rate tag — but gpu_type is present.
+		tags: tagSet("legacy", "v1", "s1", "alice", "gpu_8x_a100", "success", nil),
+	}})
+	resp := callCost(t, makeHandlerWithAim(t, aim, dir), "window=30d")
+	if resp.TotalCents != 1592 {
+		t.Fatalf("legacy rate fallback failed: want 1592, got %d", resp.TotalCents)
+	}
+}
+
+// Suppress unused-import warning for net/url if the file ever drops
+// its only consumer (the cost handler calls url.Values internally).
+var _ = url.Values{}

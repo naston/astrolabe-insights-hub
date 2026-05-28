@@ -1,23 +1,30 @@
 package api
 
-// Cost endpoint. Renders the dashboard's /cost page from state-file
-// data, no Aim cross-reference in v1.
+// Cost endpoint. Renders the dashboard's /cost page driven from Aim
+// runs (one per submit version), with state files joined in only for
+// per-experiment metadata (repo, backend) that doesn't vary across
+// versions of the same experiment.
 //
-// Scoping rationale: per-version cost would require pulling the rate
-// from somewhere durable across submits — state files only keep the
-// LATEST submit per experiment. The right path is to plumb the rate
-// into AIM_RUN_TAGS so each Aim run carries it, then the Go API can
-// join state ↔ Aim by submit_id and render multi-version cost. That's
-// a follow-up; v1 ships one row per experiment.
+// History: pre-v1.7.4 this read solely from state files, which made
+// the page show only the LATEST version per experiment — state files
+// are last-write-wins. v1.7.4 added gpu_type, rate, and outcome tags
+// to AIM_RUN_TAGS plus a terminal-state Aim writeback, so per-version
+// spend can now be derived from Aim. State files retain their original
+// role: snapshot of the latest submit, source of FSM state + repo for
+// the dashboard's home page.
 //
-// The frontend's CostExperimentEntry shape has a versions[] slice —
-// v1 always returns a single-element slice (the latest submit). Once
-// per-version rates are available we just lengthen the slice.
+// Rate fallback for pre-v1.7.4 Aim runs: the handler builds a
+// gpu_type → rate map from state files (which were backfilled by
+// `astrolabe admin backfill-cost-rates`) and applies it to any Aim
+// run lacking astrolabe.gpu_rate_cents_per_hour. Runs whose gpu_type
+// isn't in the map render with cents=null in the response and "—" in
+// the UI.
 
 import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -25,12 +32,12 @@ import (
 // money in integer cents; the frontend formats with the standard
 // 2-decimal locale.
 type CostResponse struct {
-	Window           CostWindow              `json:"window"`
-	TotalCents       int                     `json:"total_cents"`
-	PriorTotalCents  int                     `json:"prior_total_cents"`
-	TimeSeries       []CostTimeBucket        `json:"time_series"`
-	Breakdown        CostBreakdown           `json:"breakdown"`
-	Experiments      []CostExperimentEntry   `json:"experiments"`
+	Window          CostWindow            `json:"window"`
+	TotalCents      int                   `json:"total_cents"`
+	PriorTotalCents int                   `json:"prior_total_cents"`
+	TimeSeries      []CostTimeBucket      `json:"time_series"`
+	Breakdown       CostBreakdown         `json:"breakdown"`
+	Experiments     []CostExperimentEntry `json:"experiments"`
 }
 
 type CostWindow struct {
@@ -41,14 +48,14 @@ type CostWindow struct {
 }
 
 type CostTimeBucket struct {
-	Start       string         `json:"start"`         // ISO-8601 date
+	Start       string         `json:"start"`        // ISO-8601 date
 	TotalCents  int            `json:"total_cents"`
-	ByDimension map[string]int `json:"by_dimension"`  // dimension key → cents
+	ByDimension map[string]int `json:"by_dimension"` // dimension key → cents
 }
 
 type CostBreakdown struct {
-	Dimension string              `json:"dimension"`
-	Rows      []CostBreakdownRow  `json:"rows"`
+	Dimension string             `json:"dimension"`
+	Rows      []CostBreakdownRow `json:"rows"`
 }
 
 type CostBreakdownRow struct {
@@ -60,10 +67,10 @@ type CostBreakdownRow struct {
 }
 
 type CostExperimentEntry struct {
-	Name       string                  `json:"name"`
-	TotalHours float64                 `json:"total_hours"`
-	TotalCents int                     `json:"total_cents"`
-	Versions   []CostVersionEntry      `json:"versions"`
+	Name       string             `json:"name"`
+	TotalHours float64            `json:"total_hours"`
+	TotalCents int                `json:"total_cents"`
+	Versions   []CostVersionEntry `json:"versions"`
 }
 
 type CostVersionEntry struct {
@@ -72,16 +79,36 @@ type CostVersionEntry struct {
 	State          string   `json:"state"`
 	Outcome        string   `json:"outcome"`
 	Hours          *float64 `json:"hours"`           // nil = in-flight
-	Cents          *int     `json:"cents"`           // nil = in-flight
+	Cents          *int     `json:"cents"`           // nil = in-flight or unresolved rate
 	EstimatedCents int      `json:"estimated_cents"` // always populated
 }
 
 // Legacy gpu_type aliases. Mirrors astrolabe.cost.LEGACY_GPU_ALIASES on
-// the engine side — Go API consults this map when it sees a state file
-// with a hand-written historical gpu_type. Append-only.
+// the engine side — Go API consults this map when it sees an Aim run
+// or state file with a hand-written historical gpu_type. Append-only.
 var legacyGPUAliases = map[string]string{
 	"8xa100-40gb": "gpu_8x_a100",
 	"8xa100-80gb": "gpu_8x_a100_80gb_sxm4",
+}
+
+// costRun is the per-Aim-run record the cost handler operates on.
+// Built by gatherCostRuns from Aim's REST API + state-file metadata
+// (for repo / backend, which don't vary across versions of the same
+// experiment).
+type costRun struct {
+	Experiment  string
+	Version     string
+	SubmitID    string
+	GPUType     string
+	RateCents   int  // 0 if unresolved
+	HasRate     bool // distinguishes "free" (LocalExecutor → 0) from "unknown"
+	Outcome     string
+	SubmittedBy string
+	Repo        string
+	Backend     string
+	Started     time.Time
+	Ended       time.Time
+	Active      bool // Ended is zero
 }
 
 // HandleCost serves GET /api/cost. Query params:
@@ -89,8 +116,6 @@ var legacyGPUAliases = map[string]string{
 //	window   = 7d | 30d | 90d | all  (default 30d)
 //	group_by = submitter | repo | gpu_type | outcome | backend  (default submitter)
 //	stack    = none | <group_by values>  (default none)
-//
-// State files only — see file header for the v1 scoping rationale.
 func (h *Handler) HandleCost(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	window := defaultStr(q.Get("window"), "30d")
@@ -100,120 +125,53 @@ func (h *Handler) HandleCost(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	winStart, winEnd, bucket, label := resolveWindow(window, now)
 
-	if h.state == nil {
-		// No state dir configured — return empty response so the
-		// frontend renders "No spend in window" gracefully.
-		writeJSON(w, CostResponse{
-			Window: CostWindow{
-				Start:  winStart.Format(time.RFC3339),
-				End:    winEnd.Format(time.RFC3339),
-				Label:  label,
-				Bucket: bucket,
-			},
-			TimeSeries: []CostTimeBucket{},
-			Breakdown: CostBreakdown{
-				Dimension: groupBy,
-				Rows:      []CostBreakdownRow{},
-			},
-			Experiments: []CostExperimentEntry{},
-		})
+	empty := CostResponse{
+		Window: CostWindow{
+			Start:  winStart.Format(time.RFC3339),
+			End:    winEnd.Format(time.RFC3339),
+			Label:  label,
+			Bucket: bucket,
+		},
+		TimeSeries:  []CostTimeBucket{},
+		Breakdown:   CostBreakdown{Dimension: groupBy, Rows: []CostBreakdownRow{}},
+		Experiments: []CostExperimentEntry{},
+	}
+
+	if h.aim == nil {
+		writeJSON(w, empty)
 		return
 	}
 
-	states, err := h.state.ListAll()
+	allRuns, err := h.gatherCostRuns()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// Aim unreachable — render empty rather than 500. Cost is
+		// derived data; a transient Aim outage shouldn't 5xx the page.
+		writeJSON(w, empty)
 		return
 	}
 
-	// Filter to records that fall inside the window. A record's
-	// "time" for filtering purposes is its started_at; missing
-	// timestamps are skipped (can't price them).
-	inWindow := make([]ExperimentState, 0, len(states))
-	for _, s := range states {
-		t, ok := parseRFC3339Lenient(s.StartedAt)
-		if !ok {
-			continue
-		}
-		if t.Before(winStart) || t.After(winEnd) {
-			continue
-		}
-		inWindow = append(inWindow, s)
-	}
+	inWindow := filterByWindow(allRuns, winStart, winEnd)
 
-	// Build the experiments list. v1: one entry per state file, one
-	// version row inside it. The version field defaults to "v1" for
-	// pre-versioning records.
-	experiments := make([]CostExperimentEntry, 0, len(inWindow))
-	var totalCents int
-	for _, s := range inWindow {
-		hours, hoursPtr := computeHours(s, now)
-		rate, hasRate := resolvedRate(s)
-		var centsPtr *int
-		if hasRate && hoursPtr != nil {
-			c := int(float64(rate) * (*hoursPtr))
-			centsPtr = &c
-			totalCents += c
-		}
-		// Estimate falls back to record's persisted value, or rate*budget
-		// if available. Budget hours isn't surfaced through state files
-		// today — leave as the persisted estimate or 0.
-		estimated := 0
-		if s.EstimatedCostCents != nil {
-			estimated = *s.EstimatedCostCents
-		}
-		version := s.Version
-		if version == "" {
-			version = "v1"
-		}
-		experiments = append(experiments, CostExperimentEntry{
-			Name:       s.Name,
-			TotalHours: hours,
-			TotalCents: derefIntZero(centsPtr),
-			Versions: []CostVersionEntry{{
-				Version:        version,
-				GPUType:        s.GPUType,
-				State:          s.State,
-				Outcome:        normalizeOutcomeStr(s.Outcome, s.State),
-				Hours:          hoursPtr,
-				Cents:          centsPtr,
-				EstimatedCents: estimated,
-			}},
-		})
-	}
-
-	// Sort experiments by total cost desc (matches the frontend's
-	// expectation of "costliest first").
+	experiments, totalCents := buildExperiments(inWindow, now)
 	sort.Slice(experiments, func(i, j int) bool {
 		return experiments[i].TotalCents > experiments[j].TotalCents
 	})
 
-	// Time series: bucket into days. For the "all" window we still
-	// bucket daily; switch to weekly/monthly only on very long
-	// windows. v1 keeps it simple — frontend handles the X-axis
-	// rendering regardless of granularity.
-	timeSeries := buildTimeSeries(inWindow, winStart, winEnd, stack)
+	timeSeries := buildTimeSeriesFromRuns(inWindow, winStart, winEnd, stack)
+	breakdown := buildBreakdownFromRuns(inWindow, groupBy, totalCents)
 
-	// Breakdown: group records by the requested dimension.
-	breakdown := buildBreakdown(inWindow, groupBy, now, totalCents)
-
-	// Prior window total — same range shifted back by `days`. Skipped
-	// (left as 0) when window is "all"; the frontend suppresses the
-	// delta display in that case.
+	// Prior-window total — same range shifted back. Skipped (left
+	// as 0) when window is "all"; frontend hides the delta in that
+	// case.
 	var priorTotal int
 	if label != "all" {
 		days := int(winEnd.Sub(winStart).Hours() / 24)
 		priorStart := winStart.AddDate(0, 0, -days)
-		priorEnd := winStart
-		for _, s := range states {
-			t, ok := parseRFC3339Lenient(s.StartedAt)
-			if !ok || t.Before(priorStart) || !t.Before(priorEnd) {
-				continue
-			}
-			hours, _ := computeHours(s, now)
-			rate, hasRate := resolvedRate(s)
-			if hasRate {
-				priorTotal += int(float64(rate) * hours)
+		priorRuns := filterByWindow(allRuns, priorStart, winStart)
+		for _, run := range priorRuns {
+			cents := computeRunCents(run, now)
+			if cents != nil {
+				priorTotal += *cents
 			}
 		}
 	}
@@ -231,6 +189,327 @@ func (h *Handler) HandleCost(w http.ResponseWriter, r *http.Request) {
 		Breakdown:       breakdown,
 		Experiments:     experiments,
 	})
+}
+
+// gatherCostRuns reads every active Aim run, extracts the astrolabe
+// tags relevant to cost, and joins with state-file metadata for the
+// repo + backend dimensions (which don't live in Aim tags today).
+//
+// Pre-v1.7.4 runs lack gpu_type / rate / outcome tags; this function
+// applies a rate fallback derived from state files (which were
+// backfilled) keyed by gpu_type. Unmatched runs come back with
+// HasRate=false and surface as cents=null in the response.
+func (h *Handler) gatherCostRuns() ([]costRun, error) {
+	experiments, err := h.aim.ListExperiments()
+	if err != nil {
+		return nil, err
+	}
+
+	// Build a gpu_type → rate fallback map from state files. The
+	// engine's backfill walker has populated rates on every state file
+	// that matches a known gpu_type, so this map captures whatever the
+	// admin command resolved. Pre-fix Aim runs missing the rate tag
+	// look up here.
+	rateByGPU := map[string]int{}
+	repoByExp := map[string]string{}
+	backendByExp := map[string]string{}
+	stateByExp := map[string]ExperimentState{}
+	if h.state != nil {
+		if states, err := h.state.ListAll(); err == nil {
+			for _, s := range states {
+				if s.GPURateCentsPerHour != nil && s.GPUType != "" {
+					rateByGPU[s.GPUType] = *s.GPURateCentsPerHour
+					// Mirror the alias so a legacy run tagged with the
+					// short form picks up the rate too.
+					if canonical, ok := legacyGPUAliases[s.GPUType]; ok {
+						rateByGPU[canonical] = *s.GPURateCentsPerHour
+					}
+				}
+				if s.Repo != "" {
+					repoByExp[s.Name] = s.Repo
+				}
+				if s.Backend != "" {
+					backendByExp[s.Name] = s.Backend
+				}
+				stateByExp[s.Name] = s
+			}
+		}
+	}
+
+	type runJob struct {
+		expName string
+		ar      AimRun
+	}
+	var jobs []runJob
+	for _, exp := range experiments {
+		if exp.RunCount == 0 || exp.Archived {
+			continue
+		}
+		expRuns, err := h.aim.ListExperimentRuns(exp.ID)
+		if err != nil {
+			continue
+		}
+		for _, ar := range expRuns.Runs {
+			if ar.Archived {
+				continue
+			}
+			jobs = append(jobs, runJob{expName: exp.Name, ar: ar})
+		}
+	}
+
+	// Fan-out: one GetRunInfo per run for tag extraction.
+	out := make([]costRun, len(jobs))
+	var wg sync.WaitGroup
+	for i, j := range jobs {
+		wg.Add(1)
+		go func(i int, j runJob) {
+			defer wg.Done()
+			tags := AstrolabeTags{}
+			if info, err := h.aim.GetRunInfo(j.ar.RunID); err == nil {
+				tags = AstrolabeTagsFromParams(info.Params)
+			}
+			expName := tags.ExperimentName
+			if expName == "" {
+				expName = j.expName // Aim experiment fallback
+			}
+			version := tags.Version
+			if version == "" {
+				version = "v1" // legacy
+			}
+			gpuType := tags.GPUType
+			if gpuType == "" {
+				// Fall back to state file for the experiment — newer
+				// runs have it on the tag; legacy runs need this.
+				if s, ok := stateByExp[expName]; ok {
+					gpuType = s.GPUType
+				}
+			}
+			rateCents := 0
+			hasRate := false
+			if tags.GPURateCentsPerHour != nil {
+				rateCents = *tags.GPURateCentsPerHour
+				hasRate = true
+			} else if r, ok := rateByGPU[gpuType]; ok {
+				rateCents = r
+				hasRate = true
+			}
+			started := unixToTime(j.ar.CreationTime)
+			ended := unixToTime(j.ar.EndTime)
+			out[i] = costRun{
+				Experiment:  expName,
+				Version:     version,
+				SubmitID:    tags.SubmitID,
+				GPUType:     gpuType,
+				RateCents:   rateCents,
+				HasRate:     hasRate,
+				Outcome:     tags.Outcome,
+				SubmittedBy: tags.SubmittedBy,
+				Repo:        repoByExp[expName],
+				Backend:     backendByExp[expName],
+				Started:     started,
+				Ended:       ended,
+				Active:      j.ar.EndTime == 0,
+			}
+		}(i, j)
+	}
+	wg.Wait()
+
+	// Drop runs with no started timestamp — can't price them or place
+	// them in a window.
+	clean := make([]costRun, 0, len(out))
+	for _, r := range out {
+		if r.Started.IsZero() {
+			continue
+		}
+		clean = append(clean, r)
+	}
+	return clean, nil
+}
+
+// filterByWindow returns runs whose Started falls inside [start, end).
+func filterByWindow(runs []costRun, start, end time.Time) []costRun {
+	out := make([]costRun, 0, len(runs))
+	for _, r := range runs {
+		if r.Started.Before(start) || !r.Started.Before(end) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// runHours returns (hours, hoursPtr) for a single Aim run. For
+// terminal runs (Ended set), returns (delta, &delta). For in-flight,
+// returns (now-Started, nil) — the pointer being nil signals "render
+// — instead of a duration" to the frontend, mirroring the prior
+// state-file logic.
+func runHours(r costRun, now time.Time) (float64, *float64) {
+	if r.Active || r.Ended.IsZero() {
+		return now.Sub(r.Started).Hours(), nil
+	}
+	h := r.Ended.Sub(r.Started).Hours()
+	if h < 0 {
+		return 0, nil
+	}
+	return h, &h
+}
+
+// computeRunCents returns the cents this run contributes, or nil
+// when the run is in-flight or has no resolved rate.
+func computeRunCents(r costRun, now time.Time) *int {
+	if !r.HasRate {
+		return nil
+	}
+	_, hoursPtr := runHours(r, now)
+	if hoursPtr == nil {
+		return nil
+	}
+	c := int(float64(r.RateCents) * (*hoursPtr))
+	return &c
+}
+
+// buildExperiments groups runs by (experiment, version) → version
+// entry, then by experiment → experiment entry. Returns the
+// experiments list and the running total cents.
+//
+// Multi-run versions (e.g. two-model experiments where v1 ran BERT +
+// LatentBERT on the same Lambda instance) bill once per version:
+// instance hold time is approximated as max(Ended) - min(Started)
+// across the version's runs. Lambda charges per-instance, not per-
+// run, so summing run durations would overcount.
+func buildExperiments(runs []costRun, now time.Time) ([]CostExperimentEntry, int) {
+	type versionAgg struct {
+		gpuType     string
+		rateCents   int
+		hasRate     bool
+		outcome     string
+		started     time.Time
+		ended       time.Time
+		anyActive   bool
+		runCount    int
+	}
+	// experiment → version → agg
+	byExp := map[string]map[string]*versionAgg{}
+	expOrder := []string{}
+	for _, r := range runs {
+		vmap, ok := byExp[r.Experiment]
+		if !ok {
+			vmap = map[string]*versionAgg{}
+			byExp[r.Experiment] = vmap
+			expOrder = append(expOrder, r.Experiment)
+		}
+		v, ok := vmap[r.Version]
+		if !ok {
+			v = &versionAgg{
+				gpuType:   r.GPUType,
+				rateCents: r.RateCents,
+				hasRate:   r.HasRate,
+				outcome:   r.Outcome,
+				started:   r.Started,
+				ended:     r.Ended,
+			}
+			vmap[r.Version] = v
+		}
+		// Aggregate timestamps: earliest start, latest end.
+		if r.Started.Before(v.started) {
+			v.started = r.Started
+		}
+		if r.Ended.After(v.ended) {
+			v.ended = r.Ended
+		}
+		if r.Active {
+			v.anyActive = true
+		}
+		if v.outcome == "" && r.Outcome != "" {
+			v.outcome = r.Outcome
+		}
+		v.runCount++
+	}
+
+	var total int
+	out := make([]CostExperimentEntry, 0, len(byExp))
+	for _, expName := range expOrder {
+		vmap := byExp[expName]
+		// Materialize one CostVersionEntry per version, sorted by
+		// version label (v1, v2, ...) for stable rendering.
+		versionLabels := make([]string, 0, len(vmap))
+		for v := range vmap {
+			versionLabels = append(versionLabels, v)
+		}
+		sort.Slice(versionLabels, func(i, j int) bool {
+			return versionLabels[i] < versionLabels[j]
+		})
+
+		versions := make([]CostVersionEntry, 0, len(vmap))
+		var expTotalHours float64
+		var expTotalCents int
+		for _, vlabel := range versionLabels {
+			v := vmap[vlabel]
+			synth := costRun{
+				RateCents: v.rateCents,
+				HasRate:   v.hasRate,
+				Started:   v.started,
+				Ended:     v.ended,
+				Active:    v.anyActive,
+			}
+			hours, hoursPtr := runHours(synth, now)
+			cents := computeRunCents(synth, now)
+			state := deriveStateFromVersion(v.anyActive, v.outcome, v.ended)
+			outcome := v.outcome
+			if outcome == "" && !v.anyActive && !v.ended.IsZero() {
+				// Legacy terminal run with no outcome writeback —
+				// frontend's outcome filter will bucket it under
+				// "" (unknown); pass through as-is rather than
+				// guessing.
+				outcome = ""
+			}
+			versions = append(versions, CostVersionEntry{
+				Version:        vlabel,
+				GPUType:        v.gpuType,
+				State:          state,
+				Outcome:        outcome,
+				Hours:          hoursPtr,
+				Cents:          cents,
+				EstimatedCents: 0,
+			})
+			if cents != nil {
+				expTotalCents += *cents
+				total += *cents
+			}
+			if hoursPtr != nil {
+				expTotalHours += hours
+			}
+		}
+		out = append(out, CostExperimentEntry{
+			Name:       expName,
+			TotalHours: expTotalHours,
+			TotalCents: expTotalCents,
+			Versions:   versions,
+		})
+	}
+	return out, total
+}
+
+// deriveStateFromVersion gives the frontend a state hint per version.
+// Real FSM state is only on the state file (and only for the latest
+// version). For non-latest versions we infer from Aim alone:
+//   - in-flight (any run active)        → "RUNNING"
+//   - terminal + outcome=success        → "COMPLETED"
+//   - terminal + outcome present, !success → "FAILED"
+//   - terminal + no outcome (legacy)    → "COMPLETED" (best-faith;
+//     the row's outcome is empty, frontend renders "unknown")
+func deriveStateFromVersion(anyActive bool, outcome string, ended time.Time) string {
+	if anyActive || ended.IsZero() {
+		return "RUNNING"
+	}
+	switch outcome {
+	case "success":
+		return "COMPLETED"
+	case "":
+		return "COMPLETED"
+	default:
+		return "FAILED"
+	}
 }
 
 // resolveWindow maps a window label to (start, end, bucket, normalized label).
@@ -253,87 +532,14 @@ func resolveWindow(label string, now time.Time) (time.Time, time.Time, string, s
 	}
 }
 
-// resolvedRate returns the rate for a state file, applying the legacy
-// alias fallback when the recorded gpu_type doesn't match what was
-// originally persisted. Returns (rate, hasRate). Backfilled records
-// already have GPURateCentsPerHour set; this function exists to handle
-// records that never went through backfill but whose gpu_type the
-// alias map can recover.
-//
-// Note: this function CANNOT recover rates we don't have stored
-// somewhere. If GPURateCentsPerHour is nil and the gpu_type isn't in
-// the alias map, we return (0, false) and the cost UI shows "—".
-func resolvedRate(s ExperimentState) (int, bool) {
-	if s.GPURateCentsPerHour != nil {
-		return *s.GPURateCentsPerHour, true
-	}
-	// No persisted rate — try the legacy alias. Without an in-process
-	// rate cache this is informational only (we don't know what rate
-	// applies to "gpu_8x_a100" without asking Lambda, which we don't
-	// do from the dashboard). Return (0, false); cost shows "—".
-	if _, ok := legacyGPUAliases[s.GPUType]; ok {
-		return 0, false
-	}
-	return 0, false
-}
-
-// computeHours returns elapsed hours for a state file. For terminal
-// runs, finished_at - started_at. For in-flight runs (finished_at
-// missing), now - started_at — but the version-row Hours pointer is
-// nil so the frontend renders "—" and uses estimated cost instead.
-//
-// Returns (hoursFloat, hoursPtr) where hoursPtr is nil for in-flight.
-func computeHours(s ExperimentState, now time.Time) (float64, *float64) {
-	start, ok := parseRFC3339Lenient(s.StartedAt)
-	if !ok {
-		return 0, nil
-	}
-	if s.FinishedAt == "" {
-		// In-flight — frontend shows "—" for hours + estimated cost.
-		return now.Sub(start).Hours(), nil
-	}
-	end, ok := parseRFC3339Lenient(s.FinishedAt)
-	if !ok {
-		return 0, nil
-	}
-	h := end.Sub(start).Hours()
-	if h < 0 {
-		return 0, nil
-	}
-	return h, &h
-}
-
-// normalizeOutcomeStr collapses astrolabe's raw outcome vocabulary
-// (success, failure, timeout, stopped) into the cost page's {success,
-// failed} bucket. Matches the frontend's TERMINAL_FAIL_OUTCOMES set
-// and the seed's groupByKey. In-flight rows pass empty outcome.
-func normalizeOutcomeStr(outcome, state string) string {
-	switch outcome {
-	case "success":
-		return "success"
-	case "":
-		// No outcome yet — either in-flight or pre-terminal.
-		if state == "" || state == "PENDING" || state == "ACQUIRING" ||
-			state == "SETUP" || state == "RUNNING" || state == "HEALING" ||
-			state == "SUMMARIZING" {
-			return ""
-		}
-		return ""
-	default:
-		return "failed"
-	}
-}
-
-// buildTimeSeries buckets in-window records into daily slots, keying
-// the contribution by the requested stack dimension. "none" funnels
-// everything into a single "all" key so the chart renders flat bars.
-func buildTimeSeries(states []ExperimentState, start, end time.Time, stack string) []CostTimeBucket {
-	// Pre-create buckets for every day so the chart has continuous
-	// x-axis points even on quiet days.
+// buildTimeSeriesFromRuns buckets in-window runs into daily slots,
+// keying contribution by the requested stack dimension. "none" funnels
+// everything into "all" for a flat per-day total bar.
+func buildTimeSeriesFromRuns(runs []costRun, start, end time.Time, stack string) []CostTimeBucket {
 	type rec struct {
-		date   string
-		byDim  map[string]int
-		total  int
+		date  string
+		byDim map[string]int
+		total int
 	}
 	buckets := map[string]*rec{}
 	var dayKeys []string
@@ -342,32 +548,23 @@ func buildTimeSeries(states []ExperimentState, start, end time.Time, stack strin
 		buckets[k] = &rec{date: k, byDim: map[string]int{}}
 		dayKeys = append(dayKeys, k)
 	}
-	for _, s := range states {
-		t, ok := parseRFC3339Lenient(s.StartedAt)
-		if !ok {
+	now := time.Now().UTC()
+	for _, r := range runs {
+		cents := computeRunCents(r, now)
+		if cents == nil {
 			continue
 		}
-		// Assign the full cost to the experiment's started_at date.
-		// Pro-rating multi-day runs would be more accurate but
-		// adds complexity without much value for cost rollups.
-		now := time.Now().UTC()
-		hours, _ := computeHours(s, now)
-		rate, hasRate := resolvedRate(s)
-		if !hasRate {
-			continue
-		}
-		cents := int(float64(rate) * hours)
-		key := t.Format("2006-01-02")
+		key := r.Started.Format("2006-01-02")
 		b, ok := buckets[key]
 		if !ok {
 			continue
 		}
 		dimKey := "all"
 		if stack != "none" {
-			dimKey = stackKey(s, stack)
+			dimKey = runStackKey(r, stack)
 		}
-		b.byDim[dimKey] += cents
-		b.total += cents
+		b.byDim[dimKey] += *cents
+		b.total += *cents
 	}
 	out := make([]CostTimeBucket, 0, len(dayKeys))
 	for _, k := range dayKeys {
@@ -381,58 +578,71 @@ func buildTimeSeries(states []ExperimentState, start, end time.Time, stack strin
 	return out
 }
 
-// stackKey extracts the stack dimension's value from a record. Mirrors
-// the seed's groupByKey on the frontend.
-func stackKey(s ExperimentState, dim string) string {
+// runStackKey extracts a single dimension value from a costRun.
+// Mirrors the frontend seed's groupByKey.
+func runStackKey(r costRun, dim string) string {
 	switch dim {
 	case "submitter":
-		if s.SubmittedBy == "" {
+		if r.SubmittedBy == "" {
 			return "unknown"
 		}
-		return s.SubmittedBy
+		return r.SubmittedBy
 	case "repo":
-		if s.Repo == "" {
+		if r.Repo == "" {
 			return "unknown"
 		}
-		return s.Repo
+		return r.Repo
 	case "gpu_type":
-		return s.GPUType
-	case "backend":
-		if s.Backend == "" {
+		if r.GPUType == "" {
 			return "unknown"
 		}
-		return s.Backend
-	case "outcome":
-		o := normalizeOutcomeStr(s.Outcome, s.State)
-		if o == "" {
-			return "in_flight"
+		return r.GPUType
+	case "backend":
+		if r.Backend == "" {
+			return "unknown"
 		}
-		return o
+		return r.Backend
+	case "outcome":
+		switch r.Outcome {
+		case "success":
+			return "success"
+		case "":
+			if r.Active {
+				return "in_flight"
+			}
+			return "unknown"
+		default:
+			return "failed"
+		}
 	}
 	return "unknown"
 }
 
-// buildBreakdown groups records by the dimension, summing hours/cents/
-// submits + computing each row's percent of total. Sorted by cents desc.
-func buildBreakdown(states []ExperimentState, dim string, now time.Time, total int) CostBreakdown {
+// buildBreakdownFromRuns groups runs by the dimension, summing
+// hours/cents/submits + computing each row's percent of total. The
+// "submits" count is one-per-Aim-run; multi-run versions therefore
+// inflate the submits column. Cleaner would be one-per-(submit_id,
+// dim_value); deferring until the seam shows up in real usage.
+func buildBreakdownFromRuns(runs []costRun, dim string, total int) CostBreakdown {
 	type acc struct {
 		submits int
 		hours   float64
 		cents   int
 	}
+	now := time.Now().UTC()
 	groups := map[string]*acc{}
-	for _, s := range states {
-		key := stackKey(s, dim)
+	for _, r := range runs {
+		key := runStackKey(r, dim)
 		a, ok := groups[key]
 		if !ok {
 			a = &acc{}
 			groups[key] = a
 		}
 		a.submits++
-		hours, _ := computeHours(s, now)
+		hours, _ := runHours(r, now)
 		a.hours += hours
-		if rate, hasRate := resolvedRate(s); hasRate {
-			a.cents += int(float64(rate) * hours)
+		if cents := computeRunCents(r, now); cents != nil {
+			a.cents += *cents
 		}
 	}
 	rows := make([]CostBreakdownRow, 0, len(groups))
@@ -464,25 +674,15 @@ func defaultStr(v, fallback string) string {
 	return v
 }
 
-func parseRFC3339Lenient(s string) (time.Time, bool) {
-	if s == "" {
-		return time.Time{}, false
+// unixToTime converts an Aim timestamp (Unix seconds, possibly
+// fractional). Zero → zero time.
+func unixToTime(secs float64) time.Time {
+	if secs <= 0 {
+		return time.Time{}
 	}
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t.UTC(), true
-	}
-	// Try the bare-ISO form some legacy records use.
-	if t, err := time.Parse("2006-01-02T15:04:05", s[:min(len(s), 19)]); err == nil {
-		return t.UTC(), true
-	}
-	return time.Time{}, false
-}
-
-func derefIntZero(p *int) int {
-	if p == nil {
-		return 0
-	}
-	return *p
+	whole := int64(secs)
+	frac := int64((secs - float64(whole)) * 1e9)
+	return time.Unix(whole, frac).UTC()
 }
 
 func roundTo(v float64, decimals int) float64 {
@@ -493,15 +693,4 @@ func roundTo(v float64, decimals int) float64 {
 	return float64(int(v*multiplier+0.5)) / multiplier
 }
 
-// CostResponse needs a writer; reuse the package's writeJSON. Verify
-// it's in scope by reading handlers.go. (It is — writeJSON lives at
-// the bottom of that file.)
-var _ = json.Marshal // keep encoding/json import live for godoc lookups
-
-// min for Go < 1.21 compat — newer Go has it built in, but be cautious.
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
+var _ = json.Marshal // keep encoding/json import live
