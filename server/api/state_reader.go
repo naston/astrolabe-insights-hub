@@ -54,6 +54,15 @@ type ExperimentState struct {
 	// pre-date v1.2.1; the dashboard buckets those under "unknown" in
 	// the home-page Submitter filter dropdown.
 	SubmittedBy string `json:"submitted_by"`
+	// Cost-tracking fields, added with the cost-tracking work
+	// (astrolabe v1.7.x+ on the engine side). Pointer types so we can
+	// distinguish "0" (free, local backend) from "absent / pre-cost-
+	// tracking record" (renders as "—" in the cost UI). Records
+	// written before the engine started persisting these decode as
+	// nil pointers; backfilled records show the rate that was
+	// recovered via the legacy alias map.
+	GPURateCentsPerHour *int `json:"gpu_rate_cents_per_hour"`
+	EstimatedCostCents  *int `json:"estimated_cost_cents"`
 }
 
 // ListAll returns all experiment states from the state directory.

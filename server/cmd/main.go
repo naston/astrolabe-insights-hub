@@ -96,6 +96,14 @@ func main() {
 	mux.HandleFunc("/api/config/colors", handler.HandleColors)
 	mux.HandleFunc("/api/health", handler.HandleHealth)
 
+	// Cost page endpoint. Renders from state files only in v1; per-
+	// version cost (Aim cross-reference) ships later. Wrapped in the
+	// same TTL cache pattern as /api/experiments so multi-tab polling
+	// doesn't multiply load. 2s TTL is invisible to one user and cuts
+	// load proportionally at higher concurrency.
+	costCache := api.NewTTLCache(2*time.Second, 0)
+	mux.HandleFunc("/api/cost", costCache.Middleware(handler.HandleCost))
+
 	// Static files with SPA fallback. TanStack Router does client-side
 	// routing — paths like /experiment?name=foo don't exist as files
 	// on disk, so a plain http.FileServer 404s on direct navigation

@@ -24,6 +24,10 @@ export function AppShell({ children, rightSlot }: Props) {
             <Telescope className="h-4 w-4 text-primary" strokeWidth={2.25} />
             <span>Astrolabe</span>
           </Link>
+          {/* No top-nav links. The cost / spend page is reachable via the
+              clickable Spend KPI card on the home page (and direct URL).
+              Detail pages stay focused on the experiment — no cost-page
+              link competing for attention. */}
           <div className="ml-auto flex items-center gap-2">
             {rightSlot}
             <button
