@@ -163,6 +163,15 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
     [],
     { intervalMs: POLL_MS },
   );
+  // Spend KPI fetches its own slice — separate from /api/experiments
+  // so the chart / breakdown work on the cost page can evolve without
+  // bloating the home-page payload. Polled at the same cadence (cost
+  // data is cheap to compute server-side, cached at 2s on the Go API).
+  const { data: costData } = usePolling(
+    (signal) => api.cost({ window: "30d" }, signal),
+    [],
+    { intervalMs: POLL_MS },
+  );
   // Distinguish "first paint, no data yet" from "background re-fetch".
   // We only show loading affordances during the first load.
   const firstLoad = loading && data === undefined;
@@ -381,12 +390,16 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
 
   return (
     <div className="mx-auto w-full max-w-[1600px] px-6 py-6 space-y-5">
-      {/* KPI strip */}
-      <div className="grid grid-cols-4 gap-3">
+      {/* KPI strip — 5 cards, last is the clickable cost-page gateway.
+          The cost page is intentionally NOT reachable from the top nav
+          (kept clean) or from detail pages (research-focused) — this
+          KPI is the single discovery affordance. */}
+      <div className="grid grid-cols-5 gap-3">
         <KpiCard label="Total experiments" value={counts.total} />
         <KpiCard label="Active" value={counts.active} accent="info" pulse={counts.active > 0} />
         <KpiCard label="Completed" value={counts.completed} accent="success" />
         <KpiCard label="Failed" value={counts.failed} accent="destructive" />
+        <SpendKpiCard cents={costData?.total_cents} />
       </div>
 
       {/* Filter bar */}
@@ -540,6 +553,52 @@ interface KpiProps {
   value: number;
   accent?: "info" | "success" | "destructive";
   pulse?: boolean;
+}
+
+/**
+ * Clickable KPI card for the 30-day spend total. Wraps the same
+ * visual treatment as ``KpiCard`` in a router Link so the whole card
+ * is the navigation affordance. This is the SOLE entry point to the
+ * cost page — no top-nav link, no detail-page link.
+ *
+ * The hover affordance is intentional: most KPI cards are inert
+ * stat displays, so the cost card needs to advertise its
+ * clickability. Border lift + text color shift on hover does the job
+ * without needing a "→" or other gestural cruft.
+ */
+function SpendKpiCard({ cents }: { cents: number | undefined }) {
+  const value = cents === undefined
+    ? "—"
+    : `$${(cents / 100).toLocaleString(undefined, {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 0,
+      })}`;
+  return (
+    <Link
+      to="/cost"
+      className={cn(
+        "group block rounded-lg border border-border bg-card p-3 text-left",
+        "transition-colors hover:border-primary/50 hover:bg-accent/20",
+        "focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-1",
+      )}
+    >
+      <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
+        <span>Spend (30d)</span>
+        {/* "View →" affordance — explicit text + chevron makes the
+            card read as a link at rest, not just on hover. Same
+            muted-by-default / brighten-on-hover treatment as the
+            chevron-alone version. Word stays uppercase + tiny so it
+            matches the label visually instead of competing with it. */}
+        <span className="inline-flex items-center gap-0.5 transition-colors group-hover:text-foreground">
+          Details
+          <ChevronRight className="h-3 w-3" strokeWidth={2} />
+        </span>
+      </div>
+      <div className="mt-1.5 text-2xl font-semibold text-tabular text-foreground">
+        {value}
+      </div>
+    </Link>
+  );
 }
 
 function KpiCard({ label, value, accent, pulse }: KpiProps) {
