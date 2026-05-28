@@ -238,7 +238,7 @@ func TestRunOutsideWindowExcluded(t *testing.T) {
 		hash:         "abc",
 		creationTime: unixSecs(old),
 		endTime:      unixSecs(old.Add(time.Hour)),
-		tags:         tagSet("old-run", "v1", "s1", "alice", "gpu_8x_a100", "success", intPtr(1592)),
+		tags:         tagSet("old-run", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", intPtr(1592)),
 	}})
 	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d")
 	if len(resp.Experiments) != 0 {
@@ -255,7 +255,7 @@ func TestRunWithoutRateAndNoFallbackContributesNil(t *testing.T) {
 		hash:         "abc",
 		creationTime: unixSecs(start),
 		endTime:      unixSecs(start.Add(time.Hour)),
-		tags:         tagSet("no-rate", "v1", "s1", "alice", "gpu_unknown", "success", nil),
+		tags:         tagSet("no-rate", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_unknown", "success", nil),
 	}})
 	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d")
 	if len(resp.Experiments) != 1 {
@@ -284,7 +284,7 @@ func TestLocalBackendZeroRateZeroContribution(t *testing.T) {
 		hash:         "abc",
 		creationTime: unixSecs(start),
 		endTime:      unixSecs(start.Add(30 * time.Minute)),
-		tags:         tagSet("local-smoke", "v1", "s1", "alice", "local", "success", &zero),
+		tags:         tagSet("local-smoke", "v1", "11111111-1111-4111-8111-111111111111", "alice", "local", "success", &zero),
 	}})
 	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d")
 	if resp.TotalCents != 0 {
@@ -309,14 +309,14 @@ func TestTotalAndPercentages(t *testing.T) {
 			hash:         "h1",
 			creationTime: unixSecs(start1),
 			endTime:      unixSecs(start1.Add(2 * time.Hour)),
-			tags:         tagSet("run-a", "v1", "s1", "alice", "gpu_8x_a100", "success", intPtr(1592)),
+			tags:         tagSet("run-a", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", intPtr(1592)),
 		},
 		{
 			experiment:   "run-b",
 			hash:         "h2",
 			creationTime: unixSecs(start2),
 			endTime:      unixSecs(start2.Add(time.Hour)),
-			tags:         tagSet("run-b", "v1", "s2", "bob", "gpu_8x_a100", "success", intPtr(1592)),
+			tags:         tagSet("run-b", "v1", "22222222-2222-4222-8222-222222222222", "bob", "gpu_8x_a100", "success", intPtr(1592)),
 		},
 	})
 	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d&group_by=submitter")
@@ -344,14 +344,14 @@ func TestGroupByDimensionRespected(t *testing.T) {
 			hash:         "h1",
 			creationTime: unixSecs(start),
 			endTime:      unixSecs(start.Add(time.Hour)),
-			tags:         tagSet("a", "v1", "s1", "alice", "gpu_8x_a100", "success", intPtr(1592)),
+			tags:         tagSet("a", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", intPtr(1592)),
 		},
 		{
 			experiment:   "b",
 			hash:         "h2",
 			creationTime: unixSecs(start),
 			endTime:      unixSecs(start.Add(time.Hour)),
-			tags:         tagSet("b", "v1", "s2", "alice", "gpu_1x_a10", "success", intPtr(129)),
+			tags:         tagSet("b", "v1", "22222222-2222-4222-8222-222222222222", "alice", "gpu_1x_a10", "success", intPtr(129)),
 		},
 	})
 	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d&group_by=gpu_type")
@@ -370,7 +370,7 @@ func TestStackByNoneFunnelsToAll(t *testing.T) {
 		hash:         "h1",
 		creationTime: unixSecs(start),
 		endTime:      unixSecs(start.Add(time.Hour)),
-		tags:         tagSet("a", "v1", "s1", "alice", "gpu_8x_a100", "success", intPtr(1592)),
+		tags:         tagSet("a", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", intPtr(1592)),
 	}})
 	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d&stack=none")
 	for _, b := range resp.TimeSeries {
@@ -392,14 +392,14 @@ func TestStackByGPUTypeProducesDistinctKeys(t *testing.T) {
 			hash:         "h1",
 			creationTime: unixSecs(start),
 			endTime:      unixSecs(start.Add(time.Hour)),
-			tags:         tagSet("a", "v1", "s1", "alice", "gpu_8x_a100", "success", intPtr(1592)),
+			tags:         tagSet("a", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", intPtr(1592)),
 		},
 		{
 			experiment:   "b",
 			hash:         "h2",
 			creationTime: unixSecs(start),
 			endTime:      unixSecs(start.Add(time.Hour)),
-			tags:         tagSet("b", "v1", "s2", "alice", "gpu_1x_a10", "success", intPtr(129)),
+			tags:         tagSet("b", "v1", "22222222-2222-4222-8222-222222222222", "alice", "gpu_1x_a10", "success", intPtr(129)),
 		},
 	})
 	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d&stack=gpu_type")
@@ -432,7 +432,7 @@ func TestOutcomeNormalization(t *testing.T) {
 			hash:         fmt.Sprintf("h%d", i),
 			creationTime: unixSecs(start),
 			endTime:      unixSecs(start.Add(time.Hour)),
-			tags:         tagSet(c.name+fmt.Sprintf("%d", i), "v1", fmt.Sprintf("s%d", i), "alice", "gpu_8x_a100", c.outcome, intPtr(1592)),
+			tags:         tagSet(c.name+fmt.Sprintf("%d", i), "v1", fmt.Sprintf("%08d-0000-4000-8000-000000000000", i), "alice", "gpu_8x_a100", c.outcome, intPtr(1592)),
 		})
 	}
 	resp := callCost(t, makeHandlerWithAim(t, fakeAim(t, runs), ""), "window=30d&group_by=outcome")
@@ -452,7 +452,7 @@ func TestPriorTotalSuppressedOnAllWindow(t *testing.T) {
 		hash:         "h1",
 		creationTime: unixSecs(start),
 		endTime:      unixSecs(start.Add(time.Hour)),
-		tags:         tagSet("a", "v1", "s1", "alice", "gpu_8x_a100", "success", intPtr(1592)),
+		tags:         tagSet("a", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", intPtr(1592)),
 	}})
 	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=all")
 	if resp.PriorTotalCents != 0 {
@@ -478,14 +478,14 @@ func TestMultipleVersionsOfSameExperiment(t *testing.T) {
 			hash:         "h1",
 			creationTime: unixSecs(start1),
 			endTime:      unixSecs(start1.Add(2 * time.Hour)),
-			tags:         tagSet("exp1", "v1", "s1", "alice", "gpu_8x_a100", "failure", intPtr(1592)),
+			tags:         tagSet("exp1", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "failure", intPtr(1592)),
 		},
 		{
 			experiment:   "exp1",
 			hash:         "h2",
 			creationTime: unixSecs(start2),
 			endTime:      unixSecs(start2.Add(time.Hour)),
-			tags:         tagSet("exp1", "v2", "s2", "alice", "gpu_8x_a100", "success", intPtr(1592)),
+			tags:         tagSet("exp1", "v2", "22222222-2222-4222-8222-222222222222", "alice", "gpu_8x_a100", "success", intPtr(1592)),
 		},
 	})
 	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d")
@@ -534,11 +534,59 @@ func TestLegacyRunPicksUpRateFromStateFile(t *testing.T) {
 		creationTime: unixSecs(start),
 		endTime:      unixSecs(start.Add(time.Hour)),
 		// No rate tag — but gpu_type is present.
-		tags: tagSet("legacy", "v1", "s1", "alice", "gpu_8x_a100", "success", nil),
+		tags: tagSet("legacy", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", nil),
 	}})
 	resp := callCost(t, makeHandlerWithAim(t, aim, dir), "window=30d")
 	if resp.TotalCents != 1592 {
 		t.Fatalf("legacy rate fallback failed: want 1592, got %d", resp.TotalCents)
+	}
+}
+
+// --- v1.7.5: filter non-astrolabe runs -------------------------------------
+
+func TestNonAstrolabeRunsExcluded(t *testing.T) {
+	// Aim sees three runs:
+	//   1. An astrolabe submit  → real UUID submit_id, must be counted.
+	//   2. A TensorBoard import → submit_id="tb-import", must be skipped.
+	//   3. A manual Aim run     → no astrolabe.* tags at all, must be
+	//      skipped (the rate fallback used to pull these in via the
+	//      state-file gpu_type map, inflating spend numbers).
+	start := time.Now().UTC().AddDate(0, 0, -2)
+	runs := []fakeRun{
+		{
+			experiment:   "real",
+			hash:         "h1",
+			creationTime: unixSecs(start),
+			endTime:      unixSecs(start.Add(time.Hour)),
+			tags:         tagSet("real", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", intPtr(1592)),
+		},
+		{
+			experiment:   "tb-imported",
+			hash:         "h2",
+			creationTime: unixSecs(start),
+			endTime:      unixSecs(start.Add(time.Hour)),
+			// Non-UUID submit_id → filter.
+			tags: tagSet("tb-imported", "v1", "tb-import", "alice", "gpu_8x_a100", "", intPtr(1592)),
+		},
+		{
+			experiment:   "manual",
+			hash:         "h3",
+			creationTime: unixSecs(start),
+			endTime:      unixSecs(start.Add(time.Hour)),
+			// No astrolabe tags at all (empty map).
+			tags: map[string]any{},
+		},
+	}
+	resp := callCost(t, makeHandlerWithAim(t, fakeAim(t, runs), ""), "window=30d")
+	if len(resp.Experiments) != 1 {
+		t.Fatalf("expected 1 experiment (only the real one), got %d: %+v",
+			len(resp.Experiments), resp.Experiments)
+	}
+	if resp.Experiments[0].Name != "real" {
+		t.Fatalf("expected real experiment, got %q", resp.Experiments[0].Name)
+	}
+	if resp.TotalCents != 1592 {
+		t.Fatalf("total should be just the real run's 1592, got %d", resp.TotalCents)
 	}
 }
 
