@@ -62,6 +62,7 @@ const GROUP_BY_OPTIONS: Array<{ value: CostGroupByDimension; label: string }> = 
   { value: "submitter", label: "Submitter" },
   { value: "repo", label: "Repo" },
   { value: "gpu_type", label: "GPU type" },
+  { value: "backend", label: "Backend" },
   { value: "outcome", label: "Outcome" },
 ];
 

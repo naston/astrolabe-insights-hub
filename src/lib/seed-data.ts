@@ -313,6 +313,15 @@ interface CostExperimentSpec {
   /** Budget × rate, used for the in-flight estimate display. */
   estimatedHours: number;
   submitter: string;
+  /**
+   * Compute backend plugin name. Lambda is the default; the local
+   * backend covers SSH-to-LAN-machine workflows (free rate since the
+   * NUC's own GPUs aren't billed by Lambda). Adding a "local" entry to
+   * the spec list lets the Backend dimension show meaningful variation
+   * in the seed; real data will surface whatever backends are actually
+   * configured on the NUC.
+   */
+  backend: string;
   /** Comma-separated list of version labels in DESC order — newest first. */
   versions: string[];
 }
@@ -327,6 +336,7 @@ const COST_SEED_SPECS: CostExperimentSpec[] = [
     hours: 1.34,
     estimatedHours: 8.0,
     submitter: "nathan",
+    backend: "lambda",
     versions: ["v3", "v2", "v1"],
   },
   {
@@ -338,6 +348,7 @@ const COST_SEED_SPECS: CostExperimentSpec[] = [
     hours: 34.03,
     estimatedHours: 36.0,
     submitter: "nathan",
+    backend: "lambda",
     versions: ["v1"],
   },
   {
@@ -349,6 +360,7 @@ const COST_SEED_SPECS: CostExperimentSpec[] = [
     hours: 2.14,
     estimatedHours: 8.0,
     submitter: "nathan",
+    backend: "lambda",
     versions: ["v1"],
   },
   {
@@ -360,6 +372,7 @@ const COST_SEED_SPECS: CostExperimentSpec[] = [
     hours: 0.25,
     estimatedHours: 2.0,
     submitter: "nathan",
+    backend: "lambda",
     versions: ["v2", "v1"],
   },
   {
@@ -371,6 +384,7 @@ const COST_SEED_SPECS: CostExperimentSpec[] = [
     hours: null, // in-flight
     estimatedHours: 8.0,
     submitter: "nathan",
+    backend: "lambda",
     versions: ["v1"],
   },
   {
@@ -382,6 +396,7 @@ const COST_SEED_SPECS: CostExperimentSpec[] = [
     hours: 0.10,
     estimatedHours: 0.5,
     submitter: "nathan",
+    backend: "lambda",
     versions: ["v1"],
   },
   {
@@ -393,20 +408,38 @@ const COST_SEED_SPECS: CostExperimentSpec[] = [
     hours: 0.12,
     estimatedHours: 0.5,
     submitter: "nathan",
+    backend: "lambda",
+    versions: ["v1"],
+  },
+  // One local-backend entry so the Backend dimension shows variation in
+  // the seed. Local runs cost $0 (NUC's own GPUs aren't billed by
+  // Lambda) but still consume hours and show up in submits/hours counts.
+  // Mirrors a "I ran a quick debug session on the NUC's local GPU"
+  // workflow that astrolabe's `local` backend supports.
+  {
+    name: "local-smoke-test",
+    date: "2026-05-15",
+    gpu: "local",
+    state: "COMPLETED",
+    outcome: "success",
+    hours: 0.5,
+    estimatedHours: 1.0,
+    submitter: "nathan",
+    backend: "local",
     versions: ["v1"],
   },
 ];
 
 function centsForHours(gpu: string, hours: number): number {
+  // Local-backend runs aren't billed — the NUC's own GPUs are free
+  // relative to Lambda. Return 0 explicitly so the cost page doesn't
+  // assign a phantom Lambda rate to local work via the fallback path.
+  if (gpu === "local") return 0;
   const rate = LAMBDA_RATES_CENTS_PER_HOUR[gpu] ?? LAMBDA_RATES_CENTS_PER_HOUR.gpu_8x_a100;
   return Math.round(rate * hours);
 }
 
-function pickRate(gpu: string): number {
-  return LAMBDA_RATES_CENTS_PER_HOUR[gpu] ?? LAMBDA_RATES_CENTS_PER_HOUR.gpu_8x_a100;
-}
-
-type CostGroupBy = "submitter" | "repo" | "gpu_type" | "outcome";
+type CostGroupBy = "submitter" | "repo" | "gpu_type" | "outcome" | "backend";
 
 function groupByKey(spec: CostExperimentSpec, dim: CostGroupBy): string {
   switch (dim) {
@@ -419,6 +452,8 @@ function groupByKey(spec: CostExperimentSpec, dim: CostGroupBy): string {
       return "naston/ProjectOrion";
     case "gpu_type":
       return spec.gpu;
+    case "backend":
+      return spec.backend;
     case "outcome":
       // Normalize to {success, failed, in_flight} for the breakdown axis.
       // Astrolabe's raw outcome vocabulary is finer-grained (success,

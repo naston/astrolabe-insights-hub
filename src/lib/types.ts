@@ -133,7 +133,7 @@ export interface HealthResponse {
 
 export type CostWindowLabel = "7d" | "30d" | "90d" | "all" | "custom";
 
-export type CostGroupByDimension = "submitter" | "repo" | "gpu_type" | "outcome";
+export type CostGroupByDimension = "submitter" | "repo" | "gpu_type" | "outcome" | "backend";
 
 export interface CostWindow {
   start: string; // ISO-8601

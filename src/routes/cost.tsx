@@ -33,6 +33,7 @@ const GROUP_BY_VALUES: ReadonlyArray<CostGroupByDimension> = [
   "repo",
   "gpu_type",
   "outcome",
+  "backend",
 ];
 
 const STACK_VALUES: ReadonlyArray<CostGroupByDimension | "none"> = [
