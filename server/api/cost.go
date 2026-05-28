@@ -23,9 +23,20 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
+)
+
+// uuidRE matches a canonical UUID v4 string (lowercase hex with the
+// 8-4-4-4-12 hyphen layout that uuid.uuid4() emits). Used to filter
+// the cost endpoint to *only* astrolabe-managed Aim runs — non-
+// astrolabe runs and the legacy ``astrolabe import tensorboard``
+// imports either lack a submit_id or carry a sentinel like
+// ``tb-import-…`` that we don't want to count toward spend.
+var uuidRE = regexp.MustCompile(
+	`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`,
 )
 
 // CostResponse mirrors astrolabe-insights-hub/src/lib/types.ts. All
@@ -268,6 +279,14 @@ func (h *Handler) gatherCostRuns() ([]costRun, error) {
 			if info, err := h.aim.GetRunInfo(j.ar.RunID); err == nil {
 				tags = AstrolabeTagsFromParams(info.Params)
 			}
+			// Discriminator: only count runs whose submit_id is a real
+			// UUID. Manual Aim runs (no astrolabe tags) and legacy
+			// ``astrolabe import tensorboard`` imports (submit_id
+			// sentinels like ``tb-import``) drop out here; out[i]
+			// stays zero-valued and gets pruned below.
+			if !uuidRE.MatchString(tags.SubmitID) {
+				return
+			}
 			expName := tags.ExperimentName
 			if expName == "" {
 				expName = j.expName // Aim experiment fallback
@@ -314,11 +333,13 @@ func (h *Handler) gatherCostRuns() ([]costRun, error) {
 	}
 	wg.Wait()
 
-	// Drop runs with no started timestamp — can't price them or place
-	// them in a window.
+	// Drop runs with no started timestamp (can't price them or place
+	// them in a window) and runs that were filtered out by the
+	// UUID-submit_id check above (zero-valued costRun, empty
+	// Experiment field is the marker).
 	clean := make([]costRun, 0, len(out))
 	for _, r := range out {
-		if r.Started.IsZero() {
+		if r.Started.IsZero() || r.Experiment == "" {
 			continue
 		}
 		clean = append(clean, r)
