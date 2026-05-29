@@ -17,7 +17,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
-import { ArrowUp, ArrowDown, Minus } from "lucide-react";
+import { ArrowLeft, ArrowUp, ArrowDown, Minus } from "lucide-react";
 import {
   Bar,
   BarChart,
@@ -243,6 +243,13 @@ function CostHeader({
 
   return (
     <div className="space-y-2">
+      <Link
+        to="/"
+        className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+      >
+        <ArrowLeft className="h-3 w-3" />
+        Back to experiments
+      </Link>
       <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Spend</h1>
@@ -413,6 +420,13 @@ function CostChart({
             }
             className="text-xs"
             tick={{ fill: "currentColor" }}
+            // Auto-skip labels so the axis doesn't crush itself on
+            // 30d+ windows (30 daily buckets → ~30 labels by default).
+            // preserveStartEnd keeps the boundary dates visible so the
+            // axis stays interpretable; minTickGap lets Recharts pick
+            // how many in between fit at this width.
+            interval="preserveStartEnd"
+            minTickGap={40}
           />
           <YAxis
             tickFormatter={(v) => `$${v}`}

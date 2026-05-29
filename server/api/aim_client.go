@@ -168,6 +168,18 @@ type AstrolabeTags struct {
 	GPUType             string
 	GPURateCentsPerHour *int
 	Outcome             string
+	// Kind discriminates engine-created metadata runs (astrolabe.kind=
+	// "metadata", carrying cost info) from composer-created training
+	// runs (kind empty or "training"). Added v1.7.5 — the cost handler
+	// reads only metadata runs; everywhere else hides them so the
+	// experiment-detail page doesn't show a confusing extra row.
+	Kind string
+	// Repo / Backend rounds out the cost-page dimensions. Engine writes
+	// these onto the metadata run at acquire time so the cost handler
+	// doesn't need to join against state files for repo/backend
+	// stacking.
+	Repo    string
+	Backend string
 }
 
 // AstrolabeTagsFromParams extracts the astrolabe.* tags the
@@ -190,6 +202,9 @@ func AstrolabeTagsFromParams(params map[string]interface{}) AstrolabeTags {
 		SubmittedBy:    stringFromAny(params["astrolabe.user"]),
 		GPUType:        stringFromAny(params["astrolabe.gpu_type"]),
 		Outcome:        stringFromAny(params["astrolabe.outcome"]),
+		Kind:           stringFromAny(params["astrolabe.kind"]),
+		Repo:           stringFromAny(params["astrolabe.repo"]),
+		Backend:        stringFromAny(params["astrolabe.backend"]),
 	}
 	if r := intFromAny(params["astrolabe.gpu_rate_cents_per_hour"]); r != nil {
 		tags.GPURateCentsPerHour = r
@@ -199,6 +214,7 @@ func AstrolabeTagsFromParams(params map[string]interface{}) AstrolabeTags {
 	if tags.Version == "" || tags.SubmitID == "" ||
 		tags.ExperimentName == "" || tags.SubmittedBy == "" ||
 		tags.GPUType == "" || tags.Outcome == "" ||
+		tags.Kind == "" || tags.Repo == "" || tags.Backend == "" ||
 		tags.GPURateCentsPerHour == nil {
 		if nested, ok := params["astrolabe"].(map[string]interface{}); ok {
 			if tags.Version == "" {
@@ -218,6 +234,15 @@ func AstrolabeTagsFromParams(params map[string]interface{}) AstrolabeTags {
 			}
 			if tags.Outcome == "" {
 				tags.Outcome = stringFromAny(nested["outcome"])
+			}
+			if tags.Kind == "" {
+				tags.Kind = stringFromAny(nested["kind"])
+			}
+			if tags.Repo == "" {
+				tags.Repo = stringFromAny(nested["repo"])
+			}
+			if tags.Backend == "" {
+				tags.Backend = stringFromAny(nested["backend"])
 			}
 			if tags.GPURateCentsPerHour == nil {
 				if r := intFromAny(nested["gpu_rate_cents_per_hour"]); r != nil {
