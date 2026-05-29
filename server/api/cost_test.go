@@ -545,48 +545,65 @@ func TestLegacyRunPicksUpRateFromStateFile(t *testing.T) {
 // --- v1.7.5: filter non-astrolabe runs -------------------------------------
 
 func TestNonAstrolabeRunsExcluded(t *testing.T) {
-	// Aim sees three runs:
-	//   1. An astrolabe submit  → real UUID submit_id, must be counted.
-	//   2. A TensorBoard import → submit_id="tb-import", must be skipped.
-	//   3. A manual Aim run     → no astrolabe.* tags at all, must be
-	//      skipped (the rate fallback used to pull these in via the
-	//      state-file gpu_type map, inflating spend numbers).
+	// Aim sees four runs:
+	//   1. New astrolabe submit  → version + UUID submit_id, counted.
+	//   2. Old astrolabe submit  → version present, submit_id empty
+	//      (engine versions between v1.2.x and the submit_id rollout
+	//      tagged version but not submit_id). Must still be counted —
+	//      the user observed 02-muon-optimizer v2 disappearing under
+	//      the UUID-only filter on lake1.
+	//   3. TB import             → version="v1", submit_id="tb-import-…"
+	//      sentinel — must be skipped.
+	//   4. Manual Aim run        → no astrolabe.* tags — must be skipped.
 	start := time.Now().UTC().AddDate(0, 0, -2)
 	runs := []fakeRun{
 		{
-			experiment:   "real",
+			experiment:   "real-new",
 			hash:         "h1",
 			creationTime: unixSecs(start),
 			endTime:      unixSecs(start.Add(time.Hour)),
-			tags:         tagSet("real", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", intPtr(1592)),
+			tags:         tagSet("real-new", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", intPtr(1592)),
 		},
 		{
-			experiment:   "tb-imported",
+			experiment:   "real-old",
 			hash:         "h2",
 			creationTime: unixSecs(start),
 			endTime:      unixSecs(start.Add(time.Hour)),
-			// Non-UUID submit_id → filter.
-			tags: tagSet("tb-imported", "v1", "tb-import", "alice", "gpu_8x_a100", "", intPtr(1592)),
+			// Empty submit_id — engine wrote version but not submit_id.
+			tags: tagSet("real-old", "v2", "", "alice", "gpu_8x_a100", "", intPtr(1592)),
 		},
 		{
-			experiment:   "manual",
+			experiment:   "tb-imported",
 			hash:         "h3",
 			creationTime: unixSecs(start),
 			endTime:      unixSecs(start.Add(time.Hour)),
-			// No astrolabe tags at all (empty map).
-			tags: map[string]any{},
+			tags:         tagSet("tb-imported", "v1", "tb-import-2026-04-30-foo", "alice", "gpu_8x_a100", "", intPtr(1592)),
+		},
+		{
+			experiment:   "manual",
+			hash:         "h4",
+			creationTime: unixSecs(start),
+			endTime:      unixSecs(start.Add(time.Hour)),
+			tags:         map[string]any{},
 		},
 	}
 	resp := callCost(t, makeHandlerWithAim(t, fakeAim(t, runs), ""), "window=30d")
-	if len(resp.Experiments) != 1 {
-		t.Fatalf("expected 1 experiment (only the real one), got %d: %+v",
+	if len(resp.Experiments) != 2 {
+		t.Fatalf("expected 2 experiments (real-new + real-old), got %d: %+v",
 			len(resp.Experiments), resp.Experiments)
 	}
-	if resp.Experiments[0].Name != "real" {
-		t.Fatalf("expected real experiment, got %q", resp.Experiments[0].Name)
+	names := map[string]bool{}
+	for _, e := range resp.Experiments {
+		names[e.Name] = true
 	}
-	if resp.TotalCents != 1592 {
-		t.Fatalf("total should be just the real run's 1592, got %d", resp.TotalCents)
+	if !names["real-new"] || !names["real-old"] {
+		t.Fatalf("expected real-new + real-old, got %v", names)
+	}
+	if names["tb-imported"] || names["manual"] {
+		t.Fatalf("tb-imported / manual should be filtered, got %v", names)
+	}
+	if resp.TotalCents != 1592*2 {
+		t.Fatalf("total should be 2 × 1592, got %d", resp.TotalCents)
 	}
 }
 
