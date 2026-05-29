@@ -23,21 +23,39 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
 
-// uuidRE matches a canonical UUID v4 string (lowercase hex with the
-// 8-4-4-4-12 hyphen layout that uuid.uuid4() emits). Used to filter
-// the cost endpoint to *only* astrolabe-managed Aim runs — non-
-// astrolabe runs and the legacy ``astrolabe import tensorboard``
-// imports either lack a submit_id or carry a sentinel like
-// ``tb-import-…`` that we don't want to count toward spend.
-var uuidRE = regexp.MustCompile(
-	`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`,
-)
+// isAstrolabeRun decides whether an Aim run is an astrolabe-managed
+// submit that should count toward the cost page's totals.
+//
+// Discriminator: the run has an ``astrolabe.version`` tag AND its
+// ``astrolabe.submit_id`` (if present) isn't a known import sentinel.
+//
+// Why version-not-uuid: a UUID-only check rejects legitimate but old
+// runs whose engine wrote astrolabe.version but not astrolabe.submit_id
+// (the submit_id tag landed slightly after version on the engine side;
+// runs from that window have version set, submit_id empty). The
+// presence of astrolabe.version itself is a sturdy marker that astrolabe
+// produced the run.
+//
+// Why the sentinel exclusion: ``astrolabe import tensorboard`` backfills
+// stamp astrolabe.version="v1" + submit_id="tb-import-…" on the Aim run.
+// Those are historical data, not paid astrolabe spend, and explicitly
+// shouldn't appear on the cost page. Their submit_id prefix is the
+// cleanest way to filter them out.
+func isAstrolabeRun(tags AstrolabeTags) bool {
+	if tags.Version == "" {
+		return false
+	}
+	if strings.HasPrefix(tags.SubmitID, "tb-import") {
+		return false
+	}
+	return true
+}
 
 // CostResponse mirrors astrolabe-insights-hub/src/lib/types.ts. All
 // money in integer cents; the frontend formats with the standard
@@ -279,12 +297,10 @@ func (h *Handler) gatherCostRuns() ([]costRun, error) {
 			if info, err := h.aim.GetRunInfo(j.ar.RunID); err == nil {
 				tags = AstrolabeTagsFromParams(info.Params)
 			}
-			// Discriminator: only count runs whose submit_id is a real
-			// UUID. Manual Aim runs (no astrolabe tags) and legacy
-			// ``astrolabe import tensorboard`` imports (submit_id
-			// sentinels like ``tb-import``) drop out here; out[i]
-			// stays zero-valued and gets pruned below.
-			if !uuidRE.MatchString(tags.SubmitID) {
+			// Discriminator — see isAstrolabeRun. Manual Aim runs and
+			// TB-import backfills drop out here; out[i] stays
+			// zero-valued and gets pruned below.
+			if !isAstrolabeRun(tags) {
 				return
 			}
 			expName := tags.ExperimentName
