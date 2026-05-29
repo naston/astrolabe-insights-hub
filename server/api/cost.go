@@ -24,37 +24,30 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 )
 
-// isAstrolabeRun decides whether an Aim run is an astrolabe-managed
-// submit that should count toward the cost page's totals.
+// isCostMetadataRun identifies engine-created Aim runs that hold cost
+// metadata — the only runs the cost handler counts.
 //
-// Discriminator: the run has an ``astrolabe.version`` tag AND its
-// ``astrolabe.submit_id`` (if present) isn't a known import sentinel.
+// The engine creates one of these per submit at acquire-success time
+// and closes it at terminal state. It carries all the cost-relevant
+// tags (gpu_type, rate, repo, backend, outcome) and its
+// creation_time → end_time bracket reflects instance hold time —
+// exactly what Lambda charges for.
 //
-// Why version-not-uuid: a UUID-only check rejects legitimate but old
-// runs whose engine wrote astrolabe.version but not astrolabe.submit_id
-// (the submit_id tag landed slightly after version on the engine side;
-// runs from that window have version set, submit_id empty). The
-// presence of astrolabe.version itself is a sturdy marker that astrolabe
-// produced the run.
+// Discriminator: ``astrolabe.kind="metadata"``. Composer-created
+// training runs (kind empty or "training") and TB-import backfills
+// both lack this tag and are correctly excluded. Manual Aim runs
+// have no astrolabe.* tags at all and are also excluded.
 //
-// Why the sentinel exclusion: ``astrolabe import tensorboard`` backfills
-// stamp astrolabe.version="v1" + submit_id="tb-import-…" on the Aim run.
-// Those are historical data, not paid astrolabe spend, and explicitly
-// shouldn't appear on the cost page. Their submit_id prefix is the
-// cleanest way to filter them out.
-func isAstrolabeRun(tags AstrolabeTags) bool {
-	if tags.Version == "" {
-		return false
-	}
-	if strings.HasPrefix(tags.SubmitID, "tb-import") {
-		return false
-	}
-	return true
+// This decouples cost tracking from the composer callback — even
+// raw-PyTorch training that never logs to Aim still gets counted
+// because the metadata run exists regardless of what the training
+// process does.
+func isCostMetadataRun(tags AstrolabeTags) bool {
+	return tags.Kind == "metadata"
 }
 
 // CostResponse mirrors astrolabe-insights-hub/src/lib/types.ts. All
@@ -220,47 +213,36 @@ func (h *Handler) HandleCost(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// gatherCostRuns reads every active Aim run, extracts the astrolabe
-// tags relevant to cost, and joins with state-file metadata for the
-// repo + backend dimensions (which don't live in Aim tags today).
+// gatherCostRuns enumerates engine-created Aim metadata runs and
+// builds the cost handler's working dataset. Each metadata run is one
+// astrolabe submit; the cost handler groups by (experiment, version)
+// for display.
 //
-// Pre-v1.7.4 runs lack gpu_type / rate / outcome tags; this function
-// applies a rate fallback derived from state files (which were
-// backfilled) keyed by gpu_type. Unmatched runs come back with
-// HasRate=false and surface as cents=null in the response.
+// State files are consulted only for a gpu_type → rate fallback, used
+// when a metadata run is missing the rate tag (e.g., the engine failed
+// to fetch a rate at acquire time due to a Lambda outage). Everything
+// else — repo, backend, gpu_type, outcome — comes from the run's tags.
 func (h *Handler) gatherCostRuns() ([]costRun, error) {
 	experiments, err := h.aim.ListExperiments()
 	if err != nil {
 		return nil, err
 	}
 
-	// Build a gpu_type → rate fallback map from state files. The
+	// gpu_type → rate fallback for the rare case where a metadata run
+	// has no rate tag (Lambda was unreachable at acquire time). The
 	// engine's backfill walker has populated rates on every state file
 	// that matches a known gpu_type, so this map captures whatever the
-	// admin command resolved. Pre-fix Aim runs missing the rate tag
-	// look up here.
+	// admin command resolved.
 	rateByGPU := map[string]int{}
-	repoByExp := map[string]string{}
-	backendByExp := map[string]string{}
-	stateByExp := map[string]ExperimentState{}
 	if h.state != nil {
 		if states, err := h.state.ListAll(); err == nil {
 			for _, s := range states {
 				if s.GPURateCentsPerHour != nil && s.GPUType != "" {
 					rateByGPU[s.GPUType] = *s.GPURateCentsPerHour
-					// Mirror the alias so a legacy run tagged with the
-					// short form picks up the rate too.
 					if canonical, ok := legacyGPUAliases[s.GPUType]; ok {
 						rateByGPU[canonical] = *s.GPURateCentsPerHour
 					}
 				}
-				if s.Repo != "" {
-					repoByExp[s.Name] = s.Repo
-				}
-				if s.Backend != "" {
-					backendByExp[s.Name] = s.Backend
-				}
-				stateByExp[s.Name] = s
 			}
 		}
 	}
@@ -297,10 +279,11 @@ func (h *Handler) gatherCostRuns() ([]costRun, error) {
 			if info, err := h.aim.GetRunInfo(j.ar.RunID); err == nil {
 				tags = AstrolabeTagsFromParams(info.Params)
 			}
-			// Discriminator — see isAstrolabeRun. Manual Aim runs and
-			// TB-import backfills drop out here; out[i] stays
+			// Discriminator — see isCostMetadataRun. Only engine-created
+			// metadata runs count; composer runs, TB imports, and
+			// manual Aim runs all drop out here. out[i] stays
 			// zero-valued and gets pruned below.
-			if !isAstrolabeRun(tags) {
+			if !isCostMetadataRun(tags) {
 				return
 			}
 			expName := tags.ExperimentName
@@ -311,20 +294,12 @@ func (h *Handler) gatherCostRuns() ([]costRun, error) {
 			if version == "" {
 				version = "v1" // legacy
 			}
-			gpuType := tags.GPUType
-			if gpuType == "" {
-				// Fall back to state file for the experiment — newer
-				// runs have it on the tag; legacy runs need this.
-				if s, ok := stateByExp[expName]; ok {
-					gpuType = s.GPUType
-				}
-			}
 			rateCents := 0
 			hasRate := false
 			if tags.GPURateCentsPerHour != nil {
 				rateCents = *tags.GPURateCentsPerHour
 				hasRate = true
-			} else if r, ok := rateByGPU[gpuType]; ok {
+			} else if r, ok := rateByGPU[tags.GPUType]; ok {
 				rateCents = r
 				hasRate = true
 			}
@@ -334,13 +309,13 @@ func (h *Handler) gatherCostRuns() ([]costRun, error) {
 				Experiment:  expName,
 				Version:     version,
 				SubmitID:    tags.SubmitID,
-				GPUType:     gpuType,
+				GPUType:     tags.GPUType,
 				RateCents:   rateCents,
 				HasRate:     hasRate,
 				Outcome:     tags.Outcome,
 				SubmittedBy: tags.SubmittedBy,
-				Repo:        repoByExp[expName],
-				Backend:     backendByExp[expName],
+				Repo:        tags.Repo,
+				Backend:     tags.Backend,
 				Started:     started,
 				Ended:       ended,
 				Active:      j.ar.EndTime == 0,

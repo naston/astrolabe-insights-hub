@@ -413,6 +413,13 @@ function CostChart({
             }
             className="text-xs"
             tick={{ fill: "currentColor" }}
+            // Auto-skip labels so the axis doesn't crush itself on
+            // 30d+ windows (30 daily buckets → ~30 labels by default).
+            // preserveStartEnd keeps the boundary dates visible so the
+            // axis stays interpretable; minTickGap lets Recharts pick
+            // how many in between fit at this width.
+            interval="preserveStartEnd"
+            minTickGap={40}
           />
           <YAxis
             tickFormatter={(v) => `$${v}`}

@@ -181,11 +181,15 @@ func unixSecs(t time.Time) float64 {
 	return float64(t.Unix()) + float64(t.Nanosecond())/1e9
 }
 
+// tagSet builds tag maps that mimic engine-created cost-metadata runs.
+// kind="metadata" by default so the cost handler counts them; tests
+// covering the exclusion path build their own map without this tag.
 func tagSet(experiment, version, submitID, user, gpuType, outcome string, rate *int) map[string]any {
 	m := map[string]any{
 		"astrolabe.experiment": experiment,
 		"astrolabe.version":    version,
 		"astrolabe.submit_id":  submitID,
+		"astrolabe.kind":       "metadata",
 	}
 	if user != "" {
 		m["astrolabe.user"] = user
@@ -542,42 +546,50 @@ func TestLegacyRunPicksUpRateFromStateFile(t *testing.T) {
 	}
 }
 
-// --- v1.7.5: filter non-astrolabe runs -------------------------------------
+// --- v1.7.5: cost reads only engine-created metadata runs ------------------
 
-func TestNonAstrolabeRunsExcluded(t *testing.T) {
-	// Aim sees four runs:
-	//   1. New astrolabe submit  → version + UUID submit_id, counted.
-	//   2. Old astrolabe submit  → version present, submit_id empty
-	//      (engine versions between v1.2.x and the submit_id rollout
-	//      tagged version but not submit_id). Must still be counted —
-	//      the user observed 02-muon-optimizer v2 disappearing under
-	//      the UUID-only filter on lake1.
-	//   3. TB import             → version="v1", submit_id="tb-import-…"
-	//      sentinel — must be skipped.
-	//   4. Manual Aim run        → no astrolabe.* tags — must be skipped.
+func TestOnlyMetadataRunsCounted(t *testing.T) {
+	// Aim sees four runs; only one (the metadata run) should count:
+	//   1. Engine-created metadata run → kind="metadata", counted.
+	//   2. Composer training run       → kind="training", excluded
+	//      (training metrics live elsewhere; cost is metadata only).
+	//   3. TB import                   → no kind tag (pre-v1.7.5),
+	//      excluded.
+	//   4. Manual Aim run              → no astrolabe.* tags at all,
+	//      excluded.
 	start := time.Now().UTC().AddDate(0, 0, -2)
 	runs := []fakeRun{
 		{
-			experiment:   "real-new",
+			experiment:   "real",
 			hash:         "h1",
 			creationTime: unixSecs(start),
 			endTime:      unixSecs(start.Add(time.Hour)),
-			tags:         tagSet("real-new", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", intPtr(1592)),
+			tags:         tagSet("real", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", intPtr(1592)),
 		},
 		{
-			experiment:   "real-old",
+			experiment:   "real", // same experiment, composer-side training run
 			hash:         "h2",
 			creationTime: unixSecs(start),
 			endTime:      unixSecs(start.Add(time.Hour)),
-			// Empty submit_id — engine wrote version but not submit_id.
-			tags: tagSet("real-old", "v2", "", "alice", "gpu_8x_a100", "", intPtr(1592)),
+			tags: map[string]any{
+				"astrolabe.experiment": "real",
+				"astrolabe.version":    "v1",
+				"astrolabe.submit_id":  "11111111-1111-4111-8111-111111111111",
+				"astrolabe.kind":       "training", // explicit non-metadata
+			},
 		},
 		{
 			experiment:   "tb-imported",
 			hash:         "h3",
 			creationTime: unixSecs(start),
 			endTime:      unixSecs(start.Add(time.Hour)),
-			tags:         tagSet("tb-imported", "v1", "tb-import-2026-04-30-foo", "alice", "gpu_8x_a100", "", intPtr(1592)),
+			tags: map[string]any{
+				"astrolabe.experiment": "tb-imported",
+				"astrolabe.version":    "v1",
+				"astrolabe.submit_id":  "tb-import-2026-04-30-foo",
+				// No kind tag — pre-v1.7.5 import has no metadata run
+				// representation; it's just excluded.
+			},
 		},
 		{
 			experiment:   "manual",
@@ -588,22 +600,15 @@ func TestNonAstrolabeRunsExcluded(t *testing.T) {
 		},
 	}
 	resp := callCost(t, makeHandlerWithAim(t, fakeAim(t, runs), ""), "window=30d")
-	if len(resp.Experiments) != 2 {
-		t.Fatalf("expected 2 experiments (real-new + real-old), got %d: %+v",
+	if len(resp.Experiments) != 1 {
+		t.Fatalf("expected exactly 1 experiment (the metadata run's), got %d: %+v",
 			len(resp.Experiments), resp.Experiments)
 	}
-	names := map[string]bool{}
-	for _, e := range resp.Experiments {
-		names[e.Name] = true
+	if resp.Experiments[0].Name != "real" {
+		t.Fatalf("expected real, got %q", resp.Experiments[0].Name)
 	}
-	if !names["real-new"] || !names["real-old"] {
-		t.Fatalf("expected real-new + real-old, got %v", names)
-	}
-	if names["tb-imported"] || names["manual"] {
-		t.Fatalf("tb-imported / manual should be filtered, got %v", names)
-	}
-	if resp.TotalCents != 1592*2 {
-		t.Fatalf("total should be 2 × 1592, got %d", resp.TotalCents)
+	if resp.TotalCents != 1592 {
+		t.Fatalf("composer-side training run inflated total: want 1592, got %d", resp.TotalCents)
 	}
 }
 

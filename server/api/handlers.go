@@ -197,6 +197,14 @@ func (h *Handler) aimRunIndex() (
 			}
 			if info, err := h.aim.GetRunInfo(e.ar.RunID); err == nil {
 				tags := AstrolabeTagsFromParams(info.Params)
+				// Skip engine-created cost-metadata runs entirely.
+				// These exist to back the /api/cost page; they carry
+				// no training metrics and would render as confusing
+				// extra rows on the experiment-detail page.
+				if tags.Kind == "metadata" {
+					results <- indexed{i: i, rs: RunSummary{}}
+					return
+				}
 				rs.Version = tags.Version
 				rs.SubmitID = tags.SubmitID
 				rs.SubmittedBy = tags.SubmittedBy
