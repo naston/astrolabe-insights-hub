@@ -180,6 +180,15 @@ type AstrolabeTags struct {
 	// stacking.
 	Repo    string
 	Backend string
+	// StartedAtISO / FinishedAtISO are ISO-8601 timestamps written by
+	// the engine (and by the v1.7.5 backfill). These take priority
+	// over Aim's own creation_time/end_time because the engine knows
+	// the real instance acquire/release moments — Aim's
+	// ``Run.creation_time`` reflects when the Run() constructor ran,
+	// which is identical to instance-acquire for live submits but
+	// equal to backfill-time for retroactively created metadata runs.
+	StartedAtISO  string
+	FinishedAtISO string
 }
 
 // AstrolabeTagsFromParams extracts the astrolabe.* tags the
@@ -205,6 +214,8 @@ func AstrolabeTagsFromParams(params map[string]interface{}) AstrolabeTags {
 		Kind:           stringFromAny(params["astrolabe.kind"]),
 		Repo:           stringFromAny(params["astrolabe.repo"]),
 		Backend:        stringFromAny(params["astrolabe.backend"]),
+		StartedAtISO:   stringFromAny(params["astrolabe.started_at_iso"]),
+		FinishedAtISO:  stringFromAny(params["astrolabe.finished_at_iso"]),
 	}
 	if r := intFromAny(params["astrolabe.gpu_rate_cents_per_hour"]); r != nil {
 		tags.GPURateCentsPerHour = r
