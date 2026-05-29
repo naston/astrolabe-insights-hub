@@ -17,7 +17,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
-import { ArrowUp, ArrowDown, Minus } from "lucide-react";
+import { ArrowLeft, ArrowUp, ArrowDown, Minus } from "lucide-react";
 import {
   Bar,
   BarChart,
@@ -243,6 +243,13 @@ function CostHeader({
 
   return (
     <div className="space-y-2">
+      <Link
+        to="/"
+        className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+      >
+        <ArrowLeft className="h-3 w-3" />
+        Back to experiments
+      </Link>
       <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Spend</h1>
