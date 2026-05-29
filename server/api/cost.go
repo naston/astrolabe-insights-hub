@@ -303,8 +303,20 @@ func (h *Handler) gatherCostRuns() ([]costRun, error) {
 				rateCents = r
 				hasRate = true
 			}
-			started := unixToTime(j.ar.CreationTime)
-			ended := unixToTime(j.ar.EndTime)
+			// Times: prefer engine-written ISO tags, fall back to Aim's
+			// own lifecycle. The tag-first preference matters for
+			// backfilled runs — Aim's creation_time reflects when the
+			// metadata Run() was constructed (potentially long after
+			// the actual submit), but the engine's started_at_iso tag
+			// reflects the real acquire moment.
+			started := parseISO(tags.StartedAtISO)
+			if started.IsZero() {
+				started = unixToTime(j.ar.CreationTime)
+			}
+			ended := parseISO(tags.FinishedAtISO)
+			if ended.IsZero() {
+				ended = unixToTime(j.ar.EndTime)
+			}
 			out[i] = costRun{
 				Experiment:  expName,
 				Version:     version,
@@ -695,6 +707,25 @@ func unixToTime(secs float64) time.Time {
 	whole := int64(secs)
 	frac := int64((secs - float64(whole)) * 1e9)
 	return time.Unix(whole, frac).UTC()
+}
+
+// parseISO parses an ISO-8601 timestamp string written by the engine
+// (e.g. "2026-05-06T00:25:34.784457+00:00"). Returns zero on empty
+// or malformed input — the caller is expected to fall back to Aim's
+// own creation_time/end_time when this returns zero.
+func parseISO(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		// Some legacy ISO writers omit timezone; tolerate that.
+		if t2, err2 := time.Parse("2006-01-02T15:04:05.999999999", s); err2 == nil {
+			return t2.UTC()
+		}
+		return time.Time{}
+	}
+	return t.UTC()
 }
 
 func roundTo(v float64, decimals int) float64 {
