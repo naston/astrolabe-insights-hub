@@ -105,18 +105,8 @@ type CostVersionEntry struct {
 	EstimatedCents int      `json:"estimated_cents"` // always populated
 }
 
-// Legacy gpu_type aliases. Mirrors astrolabe.cost.LEGACY_GPU_ALIASES on
-// the engine side — Go API consults this map when it sees an Aim run
-// or state file with a hand-written historical gpu_type. Append-only.
-var legacyGPUAliases = map[string]string{
-	"8xa100-40gb": "gpu_8x_a100",
-	"8xa100-80gb": "gpu_8x_a100_80gb_sxm4",
-}
-
 // costRun is the per-Aim-run record the cost handler operates on.
-// Built by gatherCostRuns from Aim's REST API + state-file metadata
-// (for repo / backend, which don't vary across versions of the same
-// experiment).
+// Built from Aim's REST API; all dimensions live on the run's tags.
 type costRun struct {
 	Experiment  string
 	Version     string
@@ -218,33 +208,17 @@ func (h *Handler) HandleCost(w http.ResponseWriter, r *http.Request) {
 // astrolabe submit; the cost handler groups by (experiment, version)
 // for display.
 //
-// State files are consulted only for a gpu_type → rate fallback, used
-// when a metadata run is missing the rate tag (e.g., the engine failed
-// to fetch a rate at acquire time due to a Lambda outage). Everything
-// else — repo, backend, gpu_type, outcome — comes from the run's tags.
+// All cost dimensions — repo, backend, gpu_type, rate, outcome —
+// come from the run's tags. The prior gpu_type → rate fallback that
+// read state files is gone: in astrolabe v1.8+ rate lives exclusively
+// on the engine-written metadata run, never on the submit row. A
+// metadata run that lacks a rate tag (Lambda outage at acquire time)
+// surfaces as ``cents=nil`` in the cost UI — the run still counts in
+// submit/hour totals.
 func (h *Handler) gatherCostRuns() ([]costRun, error) {
 	experiments, err := h.aim.ListExperiments()
 	if err != nil {
 		return nil, err
-	}
-
-	// gpu_type → rate fallback for the rare case where a metadata run
-	// has no rate tag (Lambda was unreachable at acquire time). The
-	// engine's backfill walker has populated rates on every state file
-	// that matches a known gpu_type, so this map captures whatever the
-	// admin command resolved.
-	rateByGPU := map[string]int{}
-	if h.state != nil {
-		if states, err := h.state.ListAll(); err == nil {
-			for _, s := range states {
-				if s.GPURateCentsPerHour != nil && s.GPUType != "" {
-					rateByGPU[s.GPUType] = *s.GPURateCentsPerHour
-					if canonical, ok := legacyGPUAliases[s.GPUType]; ok {
-						rateByGPU[canonical] = *s.GPURateCentsPerHour
-					}
-				}
-			}
-		}
 	}
 
 	type runJob struct {
@@ -298,9 +272,6 @@ func (h *Handler) gatherCostRuns() ([]costRun, error) {
 			hasRate := false
 			if tags.GPURateCentsPerHour != nil {
 				rateCents = *tags.GPURateCentsPerHour
-				hasRate = true
-			} else if r, ok := rateByGPU[tags.GPUType]; ok {
-				rateCents = r
 				hasRate = true
 			}
 			// Times: prefer engine-written ISO tags, fall back to Aim's

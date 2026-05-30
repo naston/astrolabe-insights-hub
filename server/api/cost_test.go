@@ -26,8 +26,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -137,27 +135,12 @@ func fakeAim(t *testing.T, runs []fakeRun) *AimClient {
 	return NewAimClient(srv.URL)
 }
 
-// makeHandlerWithAim wires a handler with the given AimClient and a
-// state-dir-backed StateReader. Both may be nil where not needed.
-func makeHandlerWithAim(t *testing.T, aim *AimClient, stateDir string) *Handler {
+// makeHandlerWithAim wires a handler with the given AimClient. The
+// cost handler no longer consults the state DB — rate lives on
+// metadata Aim runs in v1.7.5+ — so callers don't pass a state arg.
+func makeHandlerWithAim(t *testing.T, aim *AimClient) *Handler {
 	t.Helper()
-	var sr *StateReader
-	if stateDir != "" {
-		sr = NewStateReader(stateDir)
-	}
-	return NewHandler(aim, sr, nil)
-}
-
-func writeState(t *testing.T, dir, name string, body map[string]any) {
-	t.Helper()
-	body["name"] = name
-	data, err := json.Marshal(body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, name+".json"), data, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	return NewHandler(aim, nil, nil)
 }
 
 func callCost(t *testing.T, h *Handler, query string) CostResponse {
@@ -211,7 +194,7 @@ func intPtr(v int) *int { return &v }
 // --- Edge cases ------------------------------------------------------------
 
 func TestHandleCostEmptyAim(t *testing.T) {
-	h := makeHandlerWithAim(t, fakeAim(t, nil), "")
+	h := makeHandlerWithAim(t, fakeAim(t, nil))
 	resp := callCost(t, h, "window=30d")
 	if resp.TotalCents != 0 {
 		t.Fatalf("expected 0 total, got %d", resp.TotalCents)
@@ -228,7 +211,7 @@ func TestHandleCostNilAim(t *testing.T) {
 	// nil AimClient → still returns an empty, well-shaped response.
 	// Mirrors the deploy state on a brand-new NUC where aim isn't
 	// configured yet; the dashboard shouldn't 5xx in that state.
-	h := makeHandlerWithAim(t, nil, "")
+	h := makeHandlerWithAim(t, nil)
 	resp := callCost(t, h, "window=30d")
 	if resp.TotalCents != 0 {
 		t.Fatalf("expected 0 total, got %d", resp.TotalCents)
@@ -244,7 +227,7 @@ func TestRunOutsideWindowExcluded(t *testing.T) {
 		endTime:      unixSecs(old.Add(time.Hour)),
 		tags:         tagSet("old-run", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", intPtr(1592)),
 	}})
-	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d")
+	resp := callCost(t, makeHandlerWithAim(t, aim), "window=30d")
 	if len(resp.Experiments) != 0 {
 		t.Fatalf("expected 0 experiments in window, got %d", len(resp.Experiments))
 	}
@@ -261,7 +244,7 @@ func TestRunWithoutRateAndNoFallbackContributesNil(t *testing.T) {
 		endTime:      unixSecs(start.Add(time.Hour)),
 		tags:         tagSet("no-rate", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_unknown", "success", nil),
 	}})
-	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d")
+	resp := callCost(t, makeHandlerWithAim(t, aim), "window=30d")
 	if len(resp.Experiments) != 1 {
 		t.Fatalf("expected 1 experiment, got %d", len(resp.Experiments))
 	}
@@ -290,7 +273,7 @@ func TestLocalBackendZeroRateZeroContribution(t *testing.T) {
 		endTime:      unixSecs(start.Add(30 * time.Minute)),
 		tags:         tagSet("local-smoke", "v1", "11111111-1111-4111-8111-111111111111", "alice", "local", "success", &zero),
 	}})
-	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d")
+	resp := callCost(t, makeHandlerWithAim(t, aim), "window=30d")
 	if resp.TotalCents != 0 {
 		t.Fatalf("local backend should contribute 0 to total, got %d", resp.TotalCents)
 	}
@@ -323,7 +306,7 @@ func TestTotalAndPercentages(t *testing.T) {
 			tags:         tagSet("run-b", "v1", "22222222-2222-4222-8222-222222222222", "bob", "gpu_8x_a100", "success", intPtr(1592)),
 		},
 	})
-	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d&group_by=submitter")
+	resp := callCost(t, makeHandlerWithAim(t, aim), "window=30d&group_by=submitter")
 	wantTotal := 3184 + 1592
 	if resp.TotalCents != wantTotal {
 		t.Fatalf("total: want %d, got %d", wantTotal, resp.TotalCents)
@@ -358,7 +341,7 @@ func TestGroupByDimensionRespected(t *testing.T) {
 			tags:         tagSet("b", "v1", "22222222-2222-4222-8222-222222222222", "alice", "gpu_1x_a10", "success", intPtr(129)),
 		},
 	})
-	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d&group_by=gpu_type")
+	resp := callCost(t, makeHandlerWithAim(t, aim), "window=30d&group_by=gpu_type")
 	if resp.Breakdown.Dimension != "gpu_type" {
 		t.Fatalf("expected dimension gpu_type, got %q", resp.Breakdown.Dimension)
 	}
@@ -376,7 +359,7 @@ func TestStackByNoneFunnelsToAll(t *testing.T) {
 		endTime:      unixSecs(start.Add(time.Hour)),
 		tags:         tagSet("a", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", intPtr(1592)),
 	}})
-	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d&stack=none")
+	resp := callCost(t, makeHandlerWithAim(t, aim), "window=30d&stack=none")
 	for _, b := range resp.TimeSeries {
 		if b.TotalCents > 0 {
 			if _, ok := b.ByDimension["all"]; !ok {
@@ -406,7 +389,7 @@ func TestStackByGPUTypeProducesDistinctKeys(t *testing.T) {
 			tags:         tagSet("b", "v1", "22222222-2222-4222-8222-222222222222", "alice", "gpu_1x_a10", "success", intPtr(129)),
 		},
 	})
-	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d&stack=gpu_type")
+	resp := callCost(t, makeHandlerWithAim(t, aim), "window=30d&stack=gpu_type")
 	for _, b := range resp.TimeSeries {
 		if b.TotalCents > 0 {
 			if len(b.ByDimension) < 2 {
@@ -439,7 +422,7 @@ func TestOutcomeNormalization(t *testing.T) {
 			tags:         tagSet(c.name+fmt.Sprintf("%d", i), "v1", fmt.Sprintf("%08d-0000-4000-8000-000000000000", i), "alice", "gpu_8x_a100", c.outcome, intPtr(1592)),
 		})
 	}
-	resp := callCost(t, makeHandlerWithAim(t, fakeAim(t, runs), ""), "window=30d&group_by=outcome")
+	resp := callCost(t, makeHandlerWithAim(t, fakeAim(t, runs)), "window=30d&group_by=outcome")
 	keys := map[string]int{}
 	for _, r := range resp.Breakdown.Rows {
 		keys[r.Key] = r.Submits
@@ -458,7 +441,7 @@ func TestPriorTotalSuppressedOnAllWindow(t *testing.T) {
 		endTime:      unixSecs(start.Add(time.Hour)),
 		tags:         tagSet("a", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", intPtr(1592)),
 	}})
-	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=all")
+	resp := callCost(t, makeHandlerWithAim(t, aim), "window=all")
 	if resp.PriorTotalCents != 0 {
 		t.Fatalf("prior_total_cents must be 0 for 'all' window, got %d", resp.PriorTotalCents)
 	}
@@ -492,7 +475,7 @@ func TestMultipleVersionsOfSameExperiment(t *testing.T) {
 			tags:         tagSet("exp1", "v2", "22222222-2222-4222-8222-222222222222", "alice", "gpu_8x_a100", "success", intPtr(1592)),
 		},
 	})
-	resp := callCost(t, makeHandlerWithAim(t, aim, ""), "window=30d")
+	resp := callCost(t, makeHandlerWithAim(t, aim), "window=30d")
 	if len(resp.Experiments) != 1 {
 		t.Fatalf("expected 1 experiment, got %d", len(resp.Experiments))
 	}
@@ -517,32 +500,31 @@ func TestMultipleVersionsOfSameExperiment(t *testing.T) {
 	}
 }
 
-func TestLegacyRunPicksUpRateFromStateFile(t *testing.T) {
-	// Aim run lacks astrolabe.gpu_rate_cents_per_hour (pre-v1.7.4).
-	// State file has the rate persisted from the backfill walker.
-	// Handler should join by gpu_type to recover the rate.
-	dir := t.TempDir()
-	writeState(t, dir, "legacy", map[string]any{
-		"state":                   "COMPLETED",
-		"gpu_type":                "gpu_8x_a100",
-		"backend":                 "lambda",
-		"submitted_by":            "alice",
-		"started_at":              time.Now().UTC().AddDate(0, 0, -2).Format(time.RFC3339),
-		"finished_at":             time.Now().UTC().AddDate(0, 0, -2).Add(time.Hour).Format(time.RFC3339),
-		"gpu_rate_cents_per_hour": 1592,
-	})
+func TestRunWithoutRateTagSurfacesAsUnresolved(t *testing.T) {
+	// The state-file rate fallback that pre-dated v1.7.5 is gone (per
+	// plans/state-files-to-sqlite.md — rate lives exclusively on the
+	// engine-written metadata Aim run now). A run lacking
+	// astrolabe.gpu_rate_cents_per_hour still counts in submit/hour
+	// totals, but contributes 0 to TotalCents and renders as "—" in
+	// the UI.
 	start := time.Now().UTC().AddDate(0, 0, -2)
 	aim := fakeAim(t, []fakeRun{{
 		experiment:   "legacy",
 		hash:         "h1",
 		creationTime: unixSecs(start),
 		endTime:      unixSecs(start.Add(time.Hour)),
-		// No rate tag — but gpu_type is present.
-		tags: tagSet("legacy", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", nil),
+		tags:         tagSet("legacy", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", nil),
 	}})
-	resp := callCost(t, makeHandlerWithAim(t, aim, dir), "window=30d")
-	if resp.TotalCents != 1592 {
-		t.Fatalf("legacy rate fallback failed: want 1592, got %d", resp.TotalCents)
+	resp := callCost(t, makeHandlerWithAim(t, aim), "window=30d")
+	if resp.TotalCents != 0 {
+		t.Fatalf("unresolved rate must contribute 0 cents, got %d", resp.TotalCents)
+	}
+	// Submit still counts even without a rate.
+	if len(resp.Experiments) != 1 {
+		t.Fatalf("want 1 experiment row, got %d", len(resp.Experiments))
+	}
+	if v := resp.Experiments[0].Versions[0].Cents; v != nil {
+		t.Fatalf("Cents must be nil for unresolved rate, got %v", v)
 	}
 }
 
@@ -599,7 +581,7 @@ func TestOnlyMetadataRunsCounted(t *testing.T) {
 			tags:         map[string]any{},
 		},
 	}
-	resp := callCost(t, makeHandlerWithAim(t, fakeAim(t, runs), ""), "window=30d")
+	resp := callCost(t, makeHandlerWithAim(t, fakeAim(t, runs)), "window=30d")
 	if len(resp.Experiments) != 1 {
 		t.Fatalf("expected exactly 1 experiment (the metadata run's), got %d: %+v",
 			len(resp.Experiments), resp.Experiments)
