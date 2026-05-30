@@ -114,6 +114,29 @@ export interface MetricSeries {
   wall_times?: number[];
 }
 
+/** One row in the eval-discovery manifest — one eval Aim run per
+ *  (model_run, task_set) pair, surfaced by /api/runs/{hash}/evals. */
+export interface EvalManifestEntry {
+  aim_run_hash: string;
+  task_set: string;
+  /** Unix seconds (float), matches Aim's serialization. */
+  creation_time: number;
+}
+
+/** Shape of /api/runs/{hash}/info — same as the existing Aim REST
+ *  response. We only extract metric names from props for the eval
+ *  table-vs-trace dispatch; the full payload is opaque otherwise. */
+export interface RunInfo {
+  params: Record<string, unknown>;
+  traces: {
+    metric: Array<{
+      name: string;
+      context: Record<string, unknown>;
+      last_value: number;
+    }>;
+  };
+}
+
 export interface ColorsResponse {
   palette: string[];
 }

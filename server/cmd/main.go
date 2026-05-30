@@ -81,6 +81,8 @@ func main() {
 		switch {
 		case strings.HasSuffix(path, "/info"):
 			handler.HandleRunInfo(w, r)
+		case strings.HasSuffix(path, "/evals"):
+			handler.HandleRunEvals(w, r)
 		case strings.Contains(path, "/metrics/"):
 			cachedMetricData(w, r)
 		case strings.HasSuffix(path, "/metrics"):

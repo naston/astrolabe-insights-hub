@@ -189,6 +189,12 @@ type AstrolabeTags struct {
 	// equal to backfill-time for retroactively created metadata runs.
 	StartedAtISO  string
 	FinishedAtISO string
+	// TaskSet / ModelRunHash are written by astrolabe.eval_results onto
+	// eval runs (``Kind == "eval"``). The eval-discovery handler reads
+	// these to group sections by ``TaskSet`` and to join eval runs back
+	// to the model run they score. Empty on non-eval runs.
+	TaskSet      string
+	ModelRunHash string
 }
 
 // AstrolabeTagsFromParams extracts the astrolabe.* tags the
@@ -216,6 +222,8 @@ func AstrolabeTagsFromParams(params map[string]interface{}) AstrolabeTags {
 		Backend:        stringFromAny(params["astrolabe.backend"]),
 		StartedAtISO:   stringFromAny(params["astrolabe.started_at_iso"]),
 		FinishedAtISO:  stringFromAny(params["astrolabe.finished_at_iso"]),
+		TaskSet:        stringFromAny(params["astrolabe.task_set"]),
+		ModelRunHash:   stringFromAny(params["astrolabe.model_run_hash"]),
 	}
 	if r := intFromAny(params["astrolabe.gpu_rate_cents_per_hour"]); r != nil {
 		tags.GPURateCentsPerHour = r
@@ -226,6 +234,7 @@ func AstrolabeTagsFromParams(params map[string]interface{}) AstrolabeTags {
 		tags.ExperimentName == "" || tags.SubmittedBy == "" ||
 		tags.GPUType == "" || tags.Outcome == "" ||
 		tags.Kind == "" || tags.Repo == "" || tags.Backend == "" ||
+		tags.TaskSet == "" || tags.ModelRunHash == "" ||
 		tags.GPURateCentsPerHour == nil {
 		if nested, ok := params["astrolabe"].(map[string]interface{}); ok {
 			if tags.Version == "" {
@@ -254,6 +263,12 @@ func AstrolabeTagsFromParams(params map[string]interface{}) AstrolabeTags {
 			}
 			if tags.Backend == "" {
 				tags.Backend = stringFromAny(nested["backend"])
+			}
+			if tags.TaskSet == "" {
+				tags.TaskSet = stringFromAny(nested["task_set"])
+			}
+			if tags.ModelRunHash == "" {
+				tags.ModelRunHash = stringFromAny(nested["model_run_hash"])
 			}
 			if tags.GPURateCentsPerHour == nil {
 				if r := intFromAny(nested["gpu_rate_cents_per_hour"]); r != nil {
