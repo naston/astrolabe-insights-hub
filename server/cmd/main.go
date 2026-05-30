@@ -19,7 +19,7 @@ func main() {
 	addr := flag.String("addr", "0.0.0.0:43801", "Listen address for the dashboard")
 	colorsFile := flag.String("colors", "", "Path to colors.json (default: config/colors.json next to binary)")
 	staticDir := flag.String("static", "", "Path to static files directory (default: static/ next to binary)")
-	stateDir := flag.String("state-dir", "", "Path to astrolabe state directory (default: ~/.astrolabe/state)")
+	stateDB := flag.String("state-db", "", "Path to astrolabe state SQLite DB (default: /var/lib/astrolabe/state.db)")
 	flag.Parse()
 
 	// Resolve paths relative to the binary location
@@ -39,15 +39,23 @@ func main() {
 		colors = defaultColors()
 	}
 
-	// Resolve state dir
-	if *stateDir == "" {
-		home, _ := os.UserHomeDir()
-		*stateDir = filepath.Join(home, ".astrolabe", "state")
+	// Resolve state DB path. System-wide single file (same posture as
+	// the Aim repo) — replaces the per-user ~/.astrolabe/state/ JSON
+	// directory in astrolabe v1.8+.
+	if *stateDB == "" {
+		*stateDB = "/var/lib/astrolabe/state.db"
 	}
 
-	// Create Aim client, state reader, and handler
+	// Create Aim client, state reader, and handler.
 	aimClient := api.NewAimClient(*aimURL)
-	stateReader := api.NewStateReader(*stateDir)
+	stateReader, err := api.NewStateReader(*stateDB)
+	if err != nil {
+		// Soft-fail: the engine may not have written its first submit
+		// yet (fresh NUC). Log and proceed with a nil reader; handlers
+		// degrade to "no experiments" rather than refusing to serve.
+		log.Printf("Warning: state DB unavailable at %s (%v); experiments list will be empty until the engine writes its first submit", *stateDB, err)
+		stateReader = nil
+	}
 	handler := api.NewHandler(aimClient, stateReader, colors)
 
 	// Response caches. TTLs and bounds chosen per plans/dashboard-scaling.md:
