@@ -1,11 +1,13 @@
 import type {
   ColorsResponse,
   CostResponse,
+  EvalManifestEntry,
   Experiment,
   HealthResponse,
   IncludesResponse,
   MetricSeries,
   Run,
+  RunInfo,
 } from "./types";
 import { seedColors, seedCost, seedExperiments, seedIncludes, seedMetric, seedRuns } from "./seed-data";
 
@@ -87,6 +89,33 @@ export const api = {
           signal,
         ),
       () => seedMetric(hash, name),
+      signal,
+    ),
+  /** Eval-discovery manifest — returns the eval Aim runs that score a
+   *  given training run, deduped by task_set keeping newest. Empty
+   *  array when no evals exist, which the dashboard renders as
+   *  "no eval data yet" empty state. */
+  evals: (modelRunHash: string, signal?: AbortSignal) =>
+    withSeed(
+      () =>
+        getJSON<EvalManifestEntry[]>(
+          `/runs/${encodeURIComponent(modelRunHash)}/evals`,
+          signal,
+        ),
+      () => [],
+      signal,
+    ),
+  /** Run info — props + metric names. Used by the Eval tab to enumerate
+   *  ``eval/<task>/<metric>`` metric names on an eval run before
+   *  fetching each series. Seed returns an empty traces list. */
+  runInfo: (hash: string, signal?: AbortSignal) =>
+    withSeed(
+      () =>
+        getJSON<RunInfo>(
+          `/runs/${encodeURIComponent(hash)}/info`,
+          signal,
+        ),
+      () => ({ params: {}, traces: { metric: [] } }),
       signal,
     ),
   colors: (signal?: AbortSignal) =>

@@ -197,11 +197,14 @@ func (h *Handler) aimRunIndex() (
 			}
 			if info, err := h.aim.GetRunInfo(e.ar.RunID); err == nil {
 				tags := AstrolabeTagsFromParams(info.Params)
-				// Skip engine-created cost-metadata runs entirely.
-				// These exist to back the /api/cost page; they carry
-				// no training metrics and would render as confusing
-				// extra rows on the experiment-detail page.
-				if tags.Kind == "metadata" {
+				// Skip engine-created cost-metadata runs and
+				// researcher-written eval runs from the
+				// experiment-detail page's run list. Both carry no
+				// training metrics; rendering them as additional rows
+				// would clutter the chart legend and stats table.
+				// Eval runs surface on the dedicated Eval tab via
+				// HandleRunEvals.
+				if tags.Kind == "metadata" || tags.Kind == "eval" {
 					results <- indexed{i: i, rs: RunSummary{}}
 					return
 				}
@@ -651,6 +654,147 @@ func (h *Handler) HandleRunInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, info)
+}
+
+// EvalManifestEntry is one row in the eval-discovery response — one
+// eval Aim run per (model_run, task_set) pair. The dashboard's Eval
+// tab calls /api/runs/<eval_run_hash>/info and .../metrics from this
+// hash to populate table cells or trace lines.
+type EvalManifestEntry struct {
+	AimRunHash   string  `json:"aim_run_hash"`
+	TaskSet      string  `json:"task_set"`
+	CreationTime float64 `json:"creation_time"`
+}
+
+// HandleRunEvals returns the manifest of eval Aim runs that score a
+// given training run.
+//
+// GET /api/runs/{model_run_hash}/evals
+// → [{ aim_run_hash, task_set, creation_time }, ...]
+//
+// Discovery filters Aim runs by ``astrolabe.kind == "eval"`` and
+// ``astrolabe.model_run_hash == <hash>``. Multiple eval runs for the
+// same (model_run, task_set) collapse to the newest by creation_time
+// (re-eval over time leaves older runs in Aim for forensics; the
+// dashboard shows the latest by default). See ``plans/eval-runs.md``
+// for the broader discovery contract.
+func (h *Handler) HandleRunEvals(w http.ResponseWriter, r *http.Request) {
+	modelRunHash := extractPathParam(r.URL.Path, "/api/runs/", "/evals")
+	if modelRunHash == "" {
+		http.Error(w, "missing run hash", http.StatusBadRequest)
+		return
+	}
+
+	experiments, err := h.aim.ListExperiments()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	// Collect candidate run-hash + creation-time pairs first (cheap),
+	// then fan out the GetRunInfo calls in parallel — same pattern as
+	// aimRunIndex. One GetRunInfo per candidate is unavoidable since
+	// the tags live in params.
+	type candidate struct {
+		hash         string
+		creationTime float64
+	}
+	var candidates []candidate
+	for _, exp := range experiments {
+		if exp.RunCount == 0 || exp.Archived {
+			continue
+		}
+		// Filing convention: eval runs live under ``eval/<task_set>``.
+		// Use this as a cheap pre-filter so we don't GetRunInfo on
+		// every training run in the repo. Falls back to a full scan
+		// if Aim's experiment naming hasn't been migrated.
+		if !strings.HasPrefix(exp.Name, "eval/") {
+			continue
+		}
+		expRuns, err := h.aim.ListExperimentRuns(exp.ID)
+		if err != nil {
+			continue
+		}
+		for _, ar := range expRuns.Runs {
+			if ar.Archived {
+				continue
+			}
+			candidates = append(candidates, candidate{
+				hash:         ar.RunID,
+				creationTime: ar.CreationTime,
+			})
+		}
+	}
+
+	type indexed struct {
+		i  int
+		e  EvalManifestEntry
+		ok bool
+	}
+	results := make(chan indexed, len(candidates))
+	var wg sync.WaitGroup
+	for i, c := range candidates {
+		wg.Add(1)
+		go func(i int, c candidate) {
+			defer wg.Done()
+			info, err := h.aim.GetRunInfo(c.hash)
+			if err != nil {
+				results <- indexed{i: i, ok: false}
+				return
+			}
+			tags := AstrolabeTagsFromParams(info.Params)
+			if tags.Kind != "eval" || tags.ModelRunHash != modelRunHash {
+				results <- indexed{i: i, ok: false}
+				return
+			}
+			results <- indexed{
+				i: i,
+				e: EvalManifestEntry{
+					AimRunHash:   c.hash,
+					TaskSet:      tags.TaskSet,
+					CreationTime: c.creationTime,
+				},
+				ok: true,
+			}
+		}(i, c)
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Dedup by task_set keeping newest creation_time. Re-running an
+	// eval mints a new Aim run with the same tags; this is the plan's
+	// re-eval policy ("latest wins, older stays for forensics").
+	newestByTaskSet := map[string]EvalManifestEntry{}
+	for r := range results {
+		if !r.ok {
+			continue
+		}
+		// task_set must be non-empty — without it the section can't be
+		// labeled. Drop rather than show a blank section.
+		if r.e.TaskSet == "" {
+			continue
+		}
+		if existing, found := newestByTaskSet[r.e.TaskSet]; !found ||
+			r.e.CreationTime > existing.CreationTime {
+			newestByTaskSet[r.e.TaskSet] = r.e
+		}
+	}
+
+	out := make([]EvalManifestEntry, 0, len(newestByTaskSet))
+	for _, e := range newestByTaskSet {
+		out = append(out, e)
+	}
+	// Deterministic order: newest first, ties broken by task_set.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreationTime != out[j].CreationTime {
+			return out[i].CreationTime > out[j].CreationTime
+		}
+		return out[i].TaskSet < out[j].TaskSet
+	})
+
+	writeJSON(w, out)
 }
 
 // HandleColors returns the configured color palette.

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { z } from "zod";
-import { ArrowLeft, ChevronDown, ExternalLink, Plus, Search } from "lucide-react";
+import { ArrowLeft, ChevronDown, ExternalLink } from "lucide-react";
 
 import { api, DEFAULT_PALETTE } from "@/lib/api";
 import type { Experiment, MetricSeries, Run } from "@/lib/types";
@@ -21,6 +21,9 @@ import { MetricChart, type ChartRunSpec } from "@/components/metric-chart";
 import { ComparisonModal, type ComparisonRunPick } from "@/components/comparison-modal";
 import { ShortcutsHelp } from "@/components/shortcuts-help";
 import { useGlobalShortcuts } from "@/hooks/use-global-shortcuts";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { EvalTabFromAllRuns } from "@/components/eval-tab";
+import { RunsPanel } from "@/components/runs-panel";
 
 const searchSchema = z.object({
   name: z.string().catch("").default(""),
@@ -250,6 +253,13 @@ function ExperimentBody({
   // Drops anything already represented in the selected version (the
   // chart's union does the same) so we don't double-count when a user
   // re-includes a run that's already native to a non-selected version.
+  // Comparison-hash set for the shared RunsPanel (O(1) lookup vs.
+  // .some() inside a row render loop).
+  const comparisonHashesSet = useMemo(
+    () => new Set(comparison.map((c) => c.hash)),
+    [comparison],
+  );
+
   const includedRunsForTable = useMemo(() => {
     const nativeHashes = new Set(selectedVersion?.runs.map((r) => r.hash) ?? []);
     return comparison.filter((c) => !nativeHashes.has(c.hash));
@@ -502,6 +512,34 @@ function ExperimentBody({
           </div>
         )}
 
+        {/* Tab strip — Training (today's body) vs Eval (benchmark blocks).
+            The header, FSM history, and unresolved-include banner sit
+            ABOVE the tabs because they belong to the experiment as a whole,
+            not to one view. The right-side sidebar stays inside the
+            Training tab — its content (metric toggles, run stats) is
+            chart-specific.
+
+            Style: underline-style tabs (rounded-none, transparent bg, 2px
+            bottom border on active) so this reads as a major page-section
+            switch rather than a minor pill toggle. The default pill style
+            from ui/tabs blends into the dense surrounding chrome. */}
+        <Tabs defaultValue="training" className="w-full">
+          <TabsList className="h-auto bg-transparent border-b border-border w-full justify-start rounded-none p-0 gap-1">
+            <TabsTrigger
+              value="training"
+              className="rounded-none border-b-2 border-transparent bg-transparent px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
+            >
+              Training
+            </TabsTrigger>
+            <TabsTrigger
+              value="eval"
+              className="rounded-none border-b-2 border-transparent bg-transparent px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
+            >
+              Eval
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="training" className="mt-3">
         {/* Body — charts grid + sidebar */}
         <div className="grid grid-cols-[minmax(0,1fr)_320px] gap-5">
           {/* Charts column */}
@@ -541,153 +579,28 @@ function ExperimentBody({
               </p>
             </div>
 
-            {/* Runs — single consolidated panel: filter, show-all/none, add-comparison,
-                and the legend list with per-row visibility toggles. The legend IS the
-                runs list; splitting them into two boxes was duplication. */}
-            <div className="rounded-lg border border-border bg-card overflow-hidden">
-              <div className="px-3 pt-3 pb-2 space-y-2 border-b border-border">
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                    Runs ({visibleRuns.length})
-                  </span>
-                  {selectedVersion && (
-                    <span className="text-[10px] font-mono text-muted-foreground">
-                      pinned: {selectedVersion.label}
-                    </span>
-                  )}
-                </div>
-                <div className="relative">
-                  <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground" />
-                  <input
-                    value={runFilter}
-                    onChange={(e) => setRunFilter(e.target.value)}
-                    placeholder="Filter runs…"
-                    className="w-full rounded-md border border-border bg-surface pl-7 pr-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
-                  />
-                </div>
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => setHiddenRuns(new Set())}
-                    disabled={noneHidden}
-                    className="flex-1 rounded border border-border bg-surface py-1 text-[10px] uppercase tracking-wider text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-default"
-                  >
-                    Show all
-                  </button>
-                  <button
-                    onClick={() => setHiddenRuns(new Set(visibleRuns.map((r) => r.hash)))}
-                    disabled={allHidden}
-                    className="flex-1 rounded border border-border bg-surface py-1 text-[10px] uppercase tracking-wider text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-default"
-                  >
-                    Show none
-                  </button>
-                </div>
-                <button
-                  onClick={() => setModalOpen(true)}
-                  className="w-full inline-flex items-center justify-center gap-1.5 rounded-md border border-primary/40 bg-[color-mix(in_oklab,var(--primary)_12%,transparent)] py-1.5 text-xs font-medium text-foreground hover:bg-[color-mix(in_oklab,var(--primary)_20%,transparent)] transition-colors"
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                  Add comparison runs
-                </button>
-              </div>
-              <ul className="max-h-[320px] overflow-y-auto scrollbar-thin divide-y divide-border">
-                {visibleRuns.length === 0 && (
-                  <li className="px-3 py-4 text-center text-xs text-muted-foreground">
-                    No runs match.
-                  </li>
-                )}
-                {visibleRuns.map((r) => {
-                  const hidden = hiddenRuns.has(r.hash);
-                  const meta = runMeta[r.hash];
-                  const isComparison = comparison.some((c) => c.hash === r.hash);
-                  return (
-                    <li
-                      key={r.hash}
-                      className={cn(
-                        "group flex items-center gap-2 px-3 py-1.5 hover:bg-muted/50",
-                        hidden && "opacity-50",
-                      )}
-                    >
-                      <button
-                        onClick={() =>
-                          setHiddenRuns((prev) => {
-                            const next = new Set(prev);
-                            if (next.has(r.hash)) next.delete(r.hash);
-                            else next.add(r.hash);
-                            return next;
-                          })
-                        }
-                        className="flex items-center gap-2 flex-1 min-w-0 text-left"
-                        aria-label={hidden ? "Show run" : "Hide run"}
-                      >
-                        <span
-                          className="h-2.5 w-2.5 rounded-sm shrink-0 ring-1 ring-border-strong"
-                          style={{ backgroundColor: runColors[r.hash] }}
-                        />
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5">
-                            {meta?.version && (
-                              <span className="font-mono text-[10px] text-foreground/80 shrink-0">
-                                {meta.version}
-                              </span>
-                            )}
-                            <CopyableHash
-                              hash={r.hash}
-                              className="font-mono text-[10px] text-muted-foreground shrink-0"
-                            />
-                            <span className="truncate text-xs">{r.name}</span>
-                            {meta?.active && (
-                              <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--info)] pulse-dot shrink-0" />
-                            )}
-                          </div>
-                          {isComparison && (
-                            <div className="text-[10px] text-muted-foreground font-mono truncate">
-                              {r.experiment}
-                              {showSubmitterLines && r.submitted_by && (
-                                <span> · by {r.submitted_by}</span>
-                              )}
-                            </div>
-                          )}
-                          {!isComparison && showSubmitterLines && r.submitted_by && (
-                            <div className="text-[10px] text-muted-foreground font-mono truncate">
-                              by {r.submitted_by}
-                            </div>
-                          )}
-                        </div>
-                      </button>
-                      {isComparison && (
-                        <button
-                          onClick={() => {
-                            setComparison((prev) => prev.filter((c) => c.hash !== r.hash));
-                            // Suppress this hash from the auto-include
-                            // refetch loop so it doesn't re-appear on
-                            // the next poll. Modal re-add (re-include
-                            // via the modal) clears it; full page
-                            // reload also clears.
-                            setRemovedFromIncludes((prev) => new Set([...prev, r.hash]));
-                          }}
-                          className="opacity-0 group-hover:opacity-100 transition-opacity rounded p-0.5 text-muted-foreground hover:text-destructive hover:bg-muted"
-                          aria-label="Remove comparison run"
-                          title="Remove comparison run"
-                        >
-                          <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            className="h-3 w-3"
-                          >
-                            <path d="M18 6 6 18M6 6l12 12" />
-                          </svg>
-                        </button>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
+            {/* Runs panel — shared with the Eval tab. State lives in
+                this component (ExperimentBody); the panel is rendered
+                in both tabs, so hiding a run on Training also hides it
+                on Eval. */}
+            <RunsPanel
+              visibleRuns={visibleRuns}
+              selectedVersionLabel={selectedVersion?.label}
+              runFilter={runFilter}
+              onRunFilterChange={setRunFilter}
+              hiddenRuns={hiddenRuns}
+              setHiddenRuns={setHiddenRuns}
+              runColors={runColors}
+              runMeta={runMeta}
+              comparisonHashes={comparisonHashesSet}
+              showSubmitterLines={showSubmitterLines}
+              onAddRuns={() => setModalOpen(true)}
+              onRemoveComparison={(hash) => {
+                setComparison((prev) => prev.filter((c) => c.hash !== hash));
+                setRemovedFromIncludes((prev) => new Set([...prev, hash]));
+              }}
+            />
+
 
             {/* Metric toggles */}
             {metricNames.length > 1 && (
@@ -745,6 +658,43 @@ function ExperimentBody({
             />
           </aside>
         </div>
+          </TabsContent>
+
+          <TabsContent value="eval" className="mt-3">
+            {/* Same two-column layout as Training so the shared RunsPanel
+                sits in the same place, regardless of tab. Hiding a run
+                on this tab also hides it on Training (and vice versa). */}
+            <div className="grid grid-cols-[minmax(0,1fr)_320px] gap-5">
+              <div className="space-y-4 min-w-0">
+                <EvalTabFromAllRuns
+                  allRuns={allRuns}
+                  currentRunHash={selectedVersion?.runs[0]?.hash}
+                  runColors={runColors}
+                  hiddenRunHashes={hiddenRuns}
+                />
+              </div>
+              <aside className="space-y-3">
+                <RunsPanel
+                  visibleRuns={visibleRuns}
+                  selectedVersionLabel={selectedVersion?.label}
+                  runFilter={runFilter}
+                  onRunFilterChange={setRunFilter}
+                  hiddenRuns={hiddenRuns}
+                  setHiddenRuns={setHiddenRuns}
+                  runColors={runColors}
+                  runMeta={runMeta}
+                  comparisonHashes={comparisonHashesSet}
+                  showSubmitterLines={showSubmitterLines}
+                  onAddRuns={() => setModalOpen(true)}
+                  onRemoveComparison={(hash) => {
+                    setComparison((prev) => prev.filter((c) => c.hash !== hash));
+                    setRemovedFromIncludes((prev) => new Set([...prev, hash]));
+                  }}
+                />
+              </aside>
+            </div>
+          </TabsContent>
+        </Tabs>
       </div>
 
       <ComparisonModal
