@@ -242,8 +242,23 @@ func (h *Handler) aimRunIndex() (
 
 // --- Route handlers ---
 
-// HandleExperiments returns all experiments from state files, enriched with Aim run counts.
+// HandleExperiments returns one row per experiment_name, enriched with
+// Aim run counts.
+//
 // GET /api/experiments
+//
+// Groups SQLite submits by ``experiment_name`` and emits the newest
+// submit per group as the representative. Before the SQLite cutover,
+// state files were one-per-experiment-name (last-write-wins), so
+// iterating them gave one row per experiment "for free"; after the
+// cutover each version is its own submit row and we have to group
+// explicitly — otherwise an experiment with five versions appears as
+// five duplicate rows on the home page.
+//
+// ``version_count`` is the number of distinct ``version`` values in
+// the SQLite group, not the count of ``astrolabe.version`` tags on
+// Aim runs. Backfilled metadata-only submits (no composer training
+// run in Aim) would otherwise be undercounted.
 func (h *Handler) HandleExperiments(w http.ResponseWriter, r *http.Request) {
 	// Get Aim runs indexed by experiment name
 	aimByExp, _, _ := h.aimRunIndex()
@@ -253,7 +268,35 @@ func (h *Handler) HandleExperiments(w http.ResponseWriter, r *http.Request) {
 	if h.state != nil {
 		states, err := h.state.ListAll()
 		if err == nil {
+			// Track distinct versions per experiment so the home-page
+			// "vN of M" badge counts ALL submits, not just those with
+			// composer training runs in Aim.
+			versionsByName := map[string]map[string]struct{}{}
 			for _, s := range states {
+				vs, ok := versionsByName[s.Name]
+				if !ok {
+					vs = map[string]struct{}{}
+					versionsByName[s.Name] = vs
+				}
+				v := s.Version
+				if v == "" {
+					// Pre-v1.2.0 records lack the version field. Bucket
+					// them as "v1" so the count stays non-zero and
+					// matches the dashboard's legacy fallback.
+					v = "v1"
+				}
+				vs[v] = struct{}{}
+			}
+
+			// ListAll returns submits newest-first by started_at, so
+			// the first time we see each experiment name in iteration
+			// IS the representative. No re-sort needed.
+			seenName := map[string]struct{}{}
+			for _, s := range states {
+				if _, dup := seenName[s.Name]; dup {
+					continue
+				}
+				seenName[s.Name] = struct{}{}
 				runs := aimByExp[s.Name]
 				experiments = append(experiments, ExperimentSummary{
 					Name:         s.Name,
@@ -265,7 +308,7 @@ func (h *Handler) HandleExperiments(w http.ResponseWriter, r *http.Request) {
 					RunCount:     len(runs),
 					Repo:         s.Repo,
 					LinearDocURL: s.LinearDocURL,
-					VersionCount: distinctVersionCount(runs),
+					VersionCount: len(versionsByName[s.Name]),
 					StateHistory: s.StateHistory,
 					SubmittedBy:  s.SubmittedBy,
 				})
@@ -279,21 +322,6 @@ func (h *Handler) HandleExperiments(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeJSON(w, experiments)
-}
-
-// distinctVersionCount counts the unique astrolabe.version tag values
-// across a slice of runs. Untagged runs (legacy) are bucketed together
-// as a single "v1" so the count reflects what the dashboard shows.
-func distinctVersionCount(runs []RunSummary) int {
-	seen := make(map[string]struct{})
-	for _, r := range runs {
-		v := r.Version
-		if v == "" {
-			v = "v1"
-		}
-		seen[v] = struct{}{}
-	}
-	return len(seen)
 }
 
 // HandleExperimentRuns returns detailed Aim run info for a specific experiment.
