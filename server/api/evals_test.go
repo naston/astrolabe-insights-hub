@@ -67,7 +67,7 @@ func callEvals(t *testing.T, h *Handler, modelRunHash string) []EvalManifestEntr
 
 func TestHandleRunEvalsNoEvals(t *testing.T) {
 	aim := fakeAim(t, nil)
-	h := makeHandlerWithAim(t, aim, "")
+	h := makeHandlerWithAim(t, aim)
 	got := callEvals(t, h, "model-1")
 	if len(got) != 0 {
 		t.Fatalf("expected empty manifest, got %v", got)
@@ -76,7 +76,7 @@ func TestHandleRunEvalsNoEvals(t *testing.T) {
 
 func TestHandleRunEvalsMissingHashReturns400(t *testing.T) {
 	aim := fakeAim(t, nil)
-	h := makeHandlerWithAim(t, aim, "")
+	h := makeHandlerWithAim(t, aim)
 	// URL with /api/runs//evals — empty path segment — must 400.
 	req := httptest.NewRequest("GET", "/api/runs//evals", nil)
 	rr := httptest.NewRecorder()
@@ -95,7 +95,7 @@ func TestHandleRunEvalsFiltersByModelRunHash(t *testing.T) {
 		makeEvalFakeRun("e2", "glue", "model-2", t0),
 	}
 	aim := fakeAim(t, runs)
-	h := makeHandlerWithAim(t, aim, "")
+	h := makeHandlerWithAim(t, aim)
 
 	got := callEvals(t, h, "model-1")
 	if len(got) != 1 {
@@ -134,7 +134,7 @@ func TestHandleRunEvalsSkipsNonEvalKind(t *testing.T) {
 		makeEvalFakeRun("eval-run", "glue", "model-1", t0),
 	}
 	aim := fakeAim(t, runs)
-	h := makeHandlerWithAim(t, aim, "")
+	h := makeHandlerWithAim(t, aim)
 
 	got := callEvals(t, h, "model-1")
 	if len(got) != 1 {
@@ -162,7 +162,7 @@ func TestHandleRunEvalsSkipsEmptyTaskSet(t *testing.T) {
 		},
 	}
 	aim := fakeAim(t, runs)
-	h := makeHandlerWithAim(t, aim, "")
+	h := makeHandlerWithAim(t, aim)
 
 	got := callEvals(t, h, "model-1")
 	if len(got) != 0 {
@@ -190,7 +190,7 @@ func TestHandleRunEvalsSkipsRunsOutsideEvalExperimentPrefix(t *testing.T) {
 		},
 	}
 	aim := fakeAim(t, runs)
-	h := makeHandlerWithAim(t, aim, "")
+	h := makeHandlerWithAim(t, aim)
 
 	got := callEvals(t, h, "model-1")
 	if len(got) != 0 {
@@ -209,7 +209,7 @@ func TestHandleRunEvalsDedupsByTaskSetKeepingNewest(t *testing.T) {
 		makeEvalFakeRun("eval-new", "glue", "model-1", newer),
 	}
 	aim := fakeAim(t, runs)
-	h := makeHandlerWithAim(t, aim, "")
+	h := makeHandlerWithAim(t, aim)
 
 	got := callEvals(t, h, "model-1")
 	if len(got) != 1 {
@@ -227,7 +227,7 @@ func TestHandleRunEvalsMultipleTaskSets(t *testing.T) {
 		makeEvalFakeRun("e-mmlu", "mmlu", "model-1", t0.Add(time.Hour)),
 	}
 	aim := fakeAim(t, runs)
-	h := makeHandlerWithAim(t, aim, "")
+	h := makeHandlerWithAim(t, aim)
 
 	got := callEvals(t, h, "model-1")
 	if len(got) != 2 {
@@ -249,7 +249,7 @@ func TestHandleRunEvalsOrdersNewestFirst(t *testing.T) {
 		makeEvalFakeRun("e-new", "glue", "model-1", t0.Add(2*time.Hour)),
 	}
 	aim := fakeAim(t, runs)
-	h := makeHandlerWithAim(t, aim, "")
+	h := makeHandlerWithAim(t, aim)
 
 	got := callEvals(t, h, "model-1")
 	if len(got) != 2 {
@@ -269,7 +269,7 @@ func TestHandleRunEvalsTaskSetBreaksTimeTies(t *testing.T) {
 		makeEvalFakeRun("e-glue", "glue", "model-1", t0),
 	}
 	aim := fakeAim(t, runs)
-	h := makeHandlerWithAim(t, aim, "")
+	h := makeHandlerWithAim(t, aim)
 
 	got := callEvals(t, h, "model-1")
 	if len(got) != 2 {
@@ -293,7 +293,7 @@ func TestHandleRunEvalsHappyPath(t *testing.T) {
 		makeEvalFakeRun("e4", "glue", "model-2", t0.Add(time.Hour)),
 	}
 	aim := fakeAim(t, runs)
-	h := makeHandlerWithAim(t, aim, "")
+	h := makeHandlerWithAim(t, aim)
 
 	got := callEvals(t, h, "model-1")
 	if len(got) != 2 {
