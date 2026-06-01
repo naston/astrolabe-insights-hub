@@ -35,10 +35,11 @@ The simplest path. The Go server runs on the NUC at `http://<nuc>:43801` and exp
 | `GET` | `/api/runs/{hash}/info` | Full Aim metadata for a run (params, traces, props) |
 | `GET` | `/api/runs/{hash}/metrics` | Available metric names for a run |
 | `GET` | `/api/runs/{hash}/metrics/{name}` | Time-series for one metric (steps, values, wall_times) |
+| `GET` | `/api/runs/{hash}/evals` | Eval-discovery manifest: eval Aim runs that score this training run (one per task_set, deduped by newest) |
 | `GET` | `/api/config/colors` | Color palette for chart rendering |
 | `GET` | `/api/health` | Connectivity check against upstream Aim API |
 
-Path params (`{name}`, `{hash}`) accept anything — metric names commonly contain slashes (`train/loss`, `eval/MaskedLanguagePerplexity`). URL-encode if your client doesn't.
+Path params (`{name}`, `{hash}`) accept anything — metric names commonly contain slashes (`train/loss`, `val/MaskedLanguagePerplexity`, `eval/cola/matthews`). URL-encode if your client doesn't.
 
 ### Response shapes (the durable contract)
 
@@ -242,7 +243,7 @@ The orchestration layer doesn't care; the visualization layer does.
 
 ### What we recommend
 
-If your framework has stable callback hooks, use [`astrolabe-callbacks`](https://github.com/naston/astrolabe-callbacks) — Composer, Lightning, and HF Trainer get framework integrations; raw loops get the `Run` context manager. The library is ~100 lines of boilerplate per framework, and you avoid drift on conventions like the `eval/` → `val/` flip planned for v1.0.
+If your framework has stable callback hooks, use [`astrolabe-callbacks`](https://github.com/naston/astrolabe-composer-callback) — Composer, Lightning, and HF Trainer get framework integrations; raw loops get the `Run` context manager. The library is ~100 lines of boilerplate per framework, and you avoid drift on conventions like the metric prefix (validation under `val/`, etc.).
 
 Roll your own only when (a) you're on a framework we don't support, or (b) you have a specific reason to keep dependencies minimal. The 10-line snippet above is the floor.
 
@@ -262,13 +263,16 @@ If you're building anything that consumes astrolabe data, lock these in:
 
 ### Metric namespace
 
-Astrolabe-callbacks routes metrics into two top-level namespaces:
+Astrolabe-callbacks routes metrics into three top-level namespaces:
 
-- `train/<name>` — per-batch / per-step training metrics
-- `eval/<name>` — during-training validation metrics (renames to `val/<name>` in v1.0 alongside the eval-runs schema; pin against either if you can, or migrate at the same time we do)
+- `train/<name>` — per-batch / per-step training metrics (on the training run)
+- `val/<name>` — during-training validation metrics (on the training run; Training tab)
+- `eval/<task_set>/<metric>` — post-training benchmark suites (on a **separate** eval Aim run tagged `astrolabe.kind="eval"`; Eval tab)
 - `wall_time` — elapsed training seconds (training-only, eval-paused) — see callback contract
 
 User-named metrics pass through unchanged. `MaskedLanguagePerplexity`, `throughput/samples_per_sec`, custom names — no rewriting.
+
+> **Legacy note**: pre-v1.0.0 `astrolabe-callbacks` emitted validation metrics under `eval/<name>` instead of `val/<name>`. Existing production Aim runs keep their `eval/*` names — they still chart correctly on the Training tab, they just sit under a deprecated prefix. The `eval/<task_set>/<metric>` shape (three segments, task_set required) is the v1.7-onwards post-training-eval pattern.
 
 ### Run name resolution order
 
