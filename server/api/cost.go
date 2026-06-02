@@ -495,7 +495,15 @@ func buildTimeSeriesFromRuns(runs []costRun, start, end time.Time, stack string)
 	}
 	buckets := map[string]*rec{}
 	var dayKeys []string
-	for d := start; d.Before(end); d = d.AddDate(0, 0, 1) {
+	// Walk daily buckets across [startDay, endDay] inclusive on both ends.
+	// The window itself (start, end) is hour-precise — a rolling
+	// 168-hour span for "7d" — but the time-series buckets are calendar
+	// UTC days. Iterating ``for d := start; d.Before(end)`` would stop
+	// before adding the bucket containing ``end``, dropping today from
+	// the chart. Truncate to day boundaries and iterate inclusive.
+	startDay := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.UTC)
+	endDay := time.Date(end.Year(), end.Month(), end.Day(), 0, 0, 0, 0, time.UTC)
+	for d := startDay; !d.After(endDay); d = d.AddDate(0, 0, 1) {
 		k := d.Format("2006-01-02")
 		buckets[k] = &rec{date: k, byDim: map[string]int{}}
 		dayKeys = append(dayKeys, k)
