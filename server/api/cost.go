@@ -119,7 +119,7 @@ func (h *Handler) HandleCost(w http.ResponseWriter, r *http.Request) {
 	// UTC's. Absolute time comparisons (filterByWindow, runHours)
 	// don't care about location — they operate on instants.
 	now := time.Now().In(loc)
-	winStart, winEnd, bucket, label := resolveWindow(window, now)
+	winStart, winEnd, windowDays, bucket, label := resolveWindow(window, now)
 
 	empty := CostResponse{
 		Window: CostWindow{
@@ -161,8 +161,7 @@ func (h *Handler) HandleCost(w http.ResponseWriter, r *http.Request) {
 	// case.
 	var priorTotal int
 	if label != "all" {
-		days := int(winEnd.Sub(winStart).Hours() / 24)
-		priorStart := winStart.AddDate(0, 0, -days)
+		priorStart := winStart.AddDate(0, 0, -windowDays)
 		priorRuns := filterByWindow(allRuns, priorStart, winStart)
 		for _, run := range priorRuns {
 			cents := computeRunCents(run, now)
@@ -474,19 +473,31 @@ func buildExperiments(runs []costRun, now time.Time) ([]CostExperimentEntry, int
 // "all" reaches back 5 years — long enough to capture any realistic
 // astrolabe history; if a NUC actually accumulates >5y of data we'll
 // extend.
-func resolveWindow(label string, now time.Time) (time.Time, time.Time, string, string) {
+// Returns (start, end, days, bucket, normalizedLabel). ``days`` is the
+// canonical day count for the label (7, 30, 90); 0 for "all" since
+// prior-period math doesn't apply.
+func resolveWindow(label string, now time.Time) (time.Time, time.Time, int, string, string) {
+	// ``end`` stays at the request instant (hour-precise) so the latest
+	// bucket captures the current partial day's spend. ``start`` is
+	// anchored to a **calendar day** in the viewer's TZ so the window
+	// contains exactly the labeled number of days: 7d → 7 buckets
+	// (today + 6 prior), 30d → 30, 90d → 90. Without day-anchoring,
+	// a 15:00-local request gives an 8-day chart for a "7d" window
+	// because the loop straddles 8 local dates between [now-168h, now].
 	end := now
+	loc := now.Location()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
 	switch label {
 	case "7d":
-		return end.AddDate(0, 0, -7), end, "daily", "7d"
+		return today.AddDate(0, 0, -6), end, 7, "daily", "7d"
 	case "30d":
-		return end.AddDate(0, 0, -30), end, "daily", "30d"
+		return today.AddDate(0, 0, -29), end, 30, "daily", "30d"
 	case "90d":
-		return end.AddDate(0, 0, -90), end, "weekly", "90d"
+		return today.AddDate(0, 0, -89), end, 90, "weekly", "90d"
 	case "all":
-		return end.AddDate(-5, 0, 0), end, "monthly", "all"
+		return today.AddDate(-5, 0, 0), end, 0, "monthly", "all"
 	default:
-		return end.AddDate(0, 0, -30), end, "daily", "30d"
+		return today.AddDate(0, 0, -29), end, 30, "daily", "30d"
 	}
 }
 

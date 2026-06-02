@@ -765,9 +765,11 @@ func TestTimeSeriesIncludesTodayBucket(t *testing.T) {
 			"If you see %s the loop is back to dropping the end day.",
 			today, last, yesterday)
 	}
-	// 7d window with day-inclusive iteration → 8 buckets (today + 7 prior days)
-	if len(resp.TimeSeries) != 8 {
-		t.Errorf("7d window should produce 8 buckets (today + 7 prior), got %d", len(resp.TimeSeries))
+	// 7d window: today + 6 prior calendar days = exactly 7 buckets.
+	// (Before day-anchoring the start, this returned 8 because the
+	// start was a hour-precise 168 hours back, straddling 8 dates.)
+	if len(resp.TimeSeries) != 7 {
+		t.Errorf("7d window should produce 7 buckets (today + 6 prior), got %d", len(resp.TimeSeries))
 	}
 }
 
