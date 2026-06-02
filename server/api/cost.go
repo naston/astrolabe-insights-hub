@@ -111,8 +111,14 @@ func (h *Handler) HandleCost(w http.ResponseWriter, r *http.Request) {
 	window := defaultStr(q.Get("window"), "30d")
 	groupBy := defaultStr(q.Get("group_by"), "submitter")
 	stack := defaultStr(q.Get("stack"), "none")
+	loc := parseTZParam(q.Get("tz"))
 
-	now := time.Now().UTC()
+	// All timestamps in the DB are UTC. The window math and the daily
+	// bucketing happen in the viewer's local TZ (passed via ``?tz=``)
+	// so the chart's X axis labels the viewer's calendar days, not
+	// UTC's. Absolute time comparisons (filterByWindow, runHours)
+	// don't care about location — they operate on instants.
+	now := time.Now().In(loc)
 	winStart, winEnd, bucket, label := resolveWindow(window, now)
 
 	empty := CostResponse{
@@ -498,11 +504,13 @@ func buildTimeSeriesFromRuns(runs []costRun, start, end time.Time, stack string)
 	// Walk daily buckets across [startDay, endDay] inclusive on both ends.
 	// The window itself (start, end) is hour-precise — a rolling
 	// 168-hour span for "7d" — but the time-series buckets are calendar
-	// UTC days. Iterating ``for d := start; d.Before(end)`` would stop
-	// before adding the bucket containing ``end``, dropping today from
-	// the chart. Truncate to day boundaries and iterate inclusive.
-	startDay := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.UTC)
-	endDay := time.Date(end.Year(), end.Month(), end.Day(), 0, 0, 0, 0, time.UTC)
+	// days in the viewer's TZ (carried on start/end via end.Location()).
+	// Iterating ``for d := start; d.Before(end)`` would stop before
+	// adding the bucket containing ``end``, dropping today from the
+	// chart. Truncate to day boundaries and iterate inclusive.
+	loc := end.Location()
+	startDay := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, loc)
+	endDay := time.Date(end.Year(), end.Month(), end.Day(), 0, 0, 0, 0, loc)
 	for d := startDay; !d.After(endDay); d = d.AddDate(0, 0, 1) {
 		k := d.Format("2006-01-02")
 		buckets[k] = &rec{date: k, byDim: map[string]int{}}
@@ -514,7 +522,11 @@ func buildTimeSeriesFromRuns(runs []costRun, start, end time.Time, stack string)
 		if cents == nil {
 			continue
 		}
-		key := r.Started.Format("2006-01-02")
+		// Convert Started (UTC, from SQLite) into the viewer's TZ
+		// before extracting the date key. A run that started at
+		// 06-03T03:00 UTC is "06-02 evening" in US-Central — it
+		// belongs in the local 06-02 bucket, not 06-03.
+		key := r.Started.In(loc).Format("2006-01-02")
 		b, ok := buckets[key]
 		if !ok {
 			continue
@@ -631,6 +643,23 @@ func defaultStr(v, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+// parseTZParam turns a ``?tz=`` query param value into a Go Location.
+// The frontend passes the viewer's IANA name (e.g. "America/Chicago")
+// from ``Intl.DateTimeFormat().resolvedOptions().timeZone``. Falls back
+// to UTC for missing or unknown zones — better to render UTC-aligned
+// buckets than to 500 on a TZ string the Go zoneinfo database doesn't
+// recognize.
+func parseTZParam(tz string) *time.Location {
+	if tz == "" {
+		return time.UTC
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return time.UTC
+	}
+	return loc
 }
 
 // parseISO parses an ISO-8601 timestamp string written by the engine
