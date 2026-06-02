@@ -3,144 +3,76 @@ package api
 // Tests for the cost handler. Contract under test (per
 // astrolabe-insights-hub/src/lib/types.ts):
 //
-//   - No Aim runs → response has empty arrays, no panic
-//   - Run outside the window → excluded
-//   - Run with no rate (no astrolabe.gpu_rate_cents_per_hour tag AND
-//     no state-file fallback) → version cents=nil, total=0, but the
-//     run still counts in submits/hours
-//   - Local backend (rate=0 tag) → submits=1, cents contribution=0
+//   - No submits → response has empty arrays, no panic
+//   - nil StateReader → empty response (handler must not 5xx on fresh
+//     NUC where the state DB hasn't been created yet)
+//   - Submit started outside the window → excluded
+//   - Submit with NULL gpu_rate_cents_per_hour → version cents=nil,
+//     total=0, but the submit still counts in submits/hours
+//   - Local backend (rate=0) → submits=1, cents contribution=0
 //   - Multi-submitter window → totals/percentages add up; biggest first
 //   - group_by dimension is honored
 //   - stack dimension is honored in the time series; "none" funnels
 //     into a single "all" key
-//   - Outcome tag dispatches to "success" / "failed" buckets
+//   - Outcome dispatches to "success" / "failed" buckets
 //   - prior_total_cents is 0 for window=all
 //   - Multiple versions of the same experiment surface as multiple
 //     CostVersionEntry rows under one CostExperimentEntry
-//   - Pre-v1.7.4 runs (missing rate tag) pick up rates from state
-//     files when the experiment's gpu_type matches
+//
+// Each test stands up a fresh SQLite DB with ``testSchemaSQL``,
+// inserts submits via ``insertSubmit``, then opens a real
+// ``StateReader`` against the DB file. The cost handler is constructed
+// with a nil AimClient — it must never reach for Aim now that cost
+// data lives entirely on the submits row.
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/http/httptest"
-	"net/url"
-	"strings"
+	"path/filepath"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
-// --- Fake Aim --------------------------------------------------------------
+// --- Test helpers ----------------------------------------------------------
 
-// fakeRun describes one Aim run for the fake server. Tag map keys
-// should use the dotted form ("astrolabe.version") to mirror what the
-// callback writes; the handler also accepts the nested form but the
-// dotted form is the production layout.
-type fakeRun struct {
-	experiment   string  // Aim experiment name
-	hash         string
-	creationTime float64 // unix seconds; 0 means missing
-	endTime      float64 // 0 means in-flight
-	tags         map[string]any
+// makeStateReaderWith builds a fresh test DB at a temp path, runs the
+// caller's seed function against an open writer connection, then
+// returns a read-only StateReader pointed at the same file. The DB
+// file lives in t.TempDir() so the test cleanup wipes it.
+func makeStateReaderWith(t *testing.T, fn func(*sql.DB)) *StateReader {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(testSchemaSQL); err != nil {
+		t.Fatal(err)
+	}
+	fn(db)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewStateReader(path)
+	if err != nil {
+		t.Fatalf("NewStateReader(%s): %v", path, err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	return r
 }
 
-// fakeAim spins up an httptest.Server that mimics the three Aim REST
-// endpoints the cost handler hits: list experiments, list runs per
-// experiment, get run info (for params/tags). The returned client
-// points at the server; t.Cleanup tears it down.
-func fakeAim(t *testing.T, runs []fakeRun) *AimClient {
+// makeCostHandler wires a handler with the given StateReader. Aim
+// client is intentionally nil — the cost handler is SQLite-only as of
+// v1.8 and must not touch Aim. (Named ``makeCostHandler`` rather than
+// ``makeHandlerWithState`` to avoid colliding with the same-named
+// helper in experiments_handler_test.go, which takes a DB path.)
+func makeCostHandler(t *testing.T, state *StateReader) *Handler {
 	t.Helper()
-
-	// Bucket runs by experiment, assigning stable IDs.
-	byExp := map[string][]fakeRun{}
-	for _, r := range runs {
-		byExp[r.experiment] = append(byExp[r.experiment], r)
-	}
-	expIDs := map[string]string{}
-	i := 0
-	for name := range byExp {
-		expIDs[name] = fmt.Sprintf("exp-%d", i)
-		i++
-	}
-	idToName := map[string]string{}
-	for name, id := range expIDs {
-		idToName[id] = name
-	}
-
-	// One dispatcher handles all three routes. Using net/http's default
-	// pattern matcher here is fiddly (overlapping /api/experiments/
-	// prefixes), so we just inspect the path ourselves.
-	dispatch := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
-		switch {
-		case path == "/api/experiments/" || path == "/api/experiments":
-			out := make([]Experiment, 0, len(expIDs))
-			for name, id := range expIDs {
-				out = append(out, Experiment{
-					ID:       id,
-					Name:     name,
-					RunCount: len(byExp[name]),
-				})
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(out)
-
-		case strings.HasPrefix(path, "/api/experiments/") && strings.HasSuffix(path, "/runs/"):
-			id := strings.TrimSuffix(strings.TrimPrefix(path, "/api/experiments/"), "/runs/")
-			name, ok := idToName[id]
-			if !ok {
-				http.NotFound(w, r)
-				return
-			}
-			runs := byExp[name]
-			out := ExperimentRuns{ID: id}
-			for _, fr := range runs {
-				out.Runs = append(out.Runs, AimRun{
-					RunID:        fr.hash,
-					Name:         fr.hash,
-					CreationTime: fr.creationTime,
-					EndTime:      fr.endTime,
-				})
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(out)
-
-		case strings.HasPrefix(path, "/api/runs/"):
-			rest := strings.TrimPrefix(path, "/api/runs/")
-			parts := strings.Split(rest, "/")
-			if len(parts) < 2 || parts[1] != "info" {
-				http.NotFound(w, r)
-				return
-			}
-			hash := parts[0]
-			for _, list := range byExp {
-				for _, fr := range list {
-					if fr.hash == hash {
-						w.Header().Set("Content-Type", "application/json")
-						_ = json.NewEncoder(w).Encode(RunInfo{Params: fr.tags})
-						return
-					}
-				}
-			}
-			http.NotFound(w, r)
-
-		default:
-			http.NotFound(w, r)
-		}
-	})
-
-	srv := httptest.NewServer(dispatch)
-	t.Cleanup(srv.Close)
-	return NewAimClient(srv.URL)
-}
-
-// makeHandlerWithAim wires a handler with the given AimClient. The
-// cost handler no longer consults the state DB — rate lives on
-// metadata Aim runs in v1.7.5+ — so callers don't pass a state arg.
-func makeHandlerWithAim(t *testing.T, aim *AimClient) *Handler {
-	t.Helper()
-	return NewHandler(aim, nil, nil)
+	return NewHandler(nil, state, nil)
 }
 
 func callCost(t *testing.T, h *Handler, query string) CostResponse {
@@ -158,43 +90,19 @@ func callCost(t *testing.T, h *Handler, query string) CostResponse {
 	return resp
 }
 
-// unixSecs returns the Unix-seconds float representation of a time —
-// matches Aim's serialization.
-func unixSecs(t time.Time) float64 {
-	return float64(t.Unix()) + float64(t.Nanosecond())/1e9
+// iso renders a time as the engine writes it.
+func iso(t time.Time) string {
+	return t.UTC().Format(time.RFC3339Nano)
 }
-
-// tagSet builds tag maps that mimic engine-created cost-metadata runs.
-// kind="metadata" by default so the cost handler counts them; tests
-// covering the exclusion path build their own map without this tag.
-func tagSet(experiment, version, submitID, user, gpuType, outcome string, rate *int) map[string]any {
-	m := map[string]any{
-		"astrolabe.experiment": experiment,
-		"astrolabe.version":    version,
-		"astrolabe.submit_id":  submitID,
-		"astrolabe.kind":       "metadata",
-	}
-	if user != "" {
-		m["astrolabe.user"] = user
-	}
-	if gpuType != "" {
-		m["astrolabe.gpu_type"] = gpuType
-	}
-	if outcome != "" {
-		m["astrolabe.outcome"] = outcome
-	}
-	if rate != nil {
-		m["astrolabe.gpu_rate_cents_per_hour"] = fmt.Sprintf("%d", *rate)
-	}
-	return m
-}
-
-func intPtr(v int) *int { return &v }
 
 // --- Edge cases ------------------------------------------------------------
 
-func TestHandleCostEmptyAim(t *testing.T) {
-	h := makeHandlerWithAim(t, fakeAim(t, nil))
+// TestHandleCostEmptyDB exercises the no-rows path: the response must
+// be shaped (non-nil slices, label populated) so the frontend renders
+// an empty state without a JS-side null deref.
+func TestHandleCostEmptyDB(t *testing.T) {
+	state := makeStateReaderWith(t, func(db *sql.DB) {})
+	h := makeCostHandler(t, state)
 	resp := callCost(t, h, "window=30d")
 	if resp.TotalCents != 0 {
 		t.Fatalf("expected 0 total, got %d", resp.TotalCents)
@@ -207,50 +115,72 @@ func TestHandleCostEmptyAim(t *testing.T) {
 	}
 }
 
-func TestHandleCostNilAim(t *testing.T) {
-	// nil AimClient → still returns an empty, well-shaped response.
-	// Mirrors the deploy state on a brand-new NUC where aim isn't
-	// configured yet; the dashboard shouldn't 5xx in that state.
-	h := makeHandlerWithAim(t, nil)
+// TestHandleCostNilState exercises the brand-new-NUC path where the
+// state DB file doesn't exist yet; cmd/main.go passes a nil reader in
+// that case. The handler must still produce a well-shaped empty
+// response, not 5xx.
+func TestHandleCostNilState(t *testing.T) {
+	h := makeCostHandler(t, nil)
 	resp := callCost(t, h, "window=30d")
 	if resp.TotalCents != 0 {
 		t.Fatalf("expected 0 total, got %d", resp.TotalCents)
 	}
+	if resp.Experiments == nil || resp.TimeSeries == nil || resp.Breakdown.Rows == nil {
+		t.Fatalf("nil slices in response — frontend will choke")
+	}
 }
 
+// TestRunOutsideWindowExcluded checks the time filter. A submit
+// started 60 days ago must not show up in a 30-day window.
 func TestRunOutsideWindowExcluded(t *testing.T) {
 	old := time.Now().UTC().AddDate(0, 0, -60)
-	aim := fakeAim(t, []fakeRun{{
-		experiment:   "old-run",
-		hash:         "abc",
-		creationTime: unixSecs(old),
-		endTime:      unixSecs(old.Add(time.Hour)),
-		tags:         tagSet("old-run", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", intPtr(1592)),
-	}})
-	resp := callCost(t, makeHandlerWithAim(t, aim), "window=30d")
+	state := makeStateReaderWith(t, func(db *sql.DB) {
+		insertSubmit(t, db, map[string]any{
+			"experiment_name":         "old-run",
+			"version":                 "v1",
+			"submitted_by":            "alice",
+			"backend":                 "lambda",
+			"gpu_type":                "gpu_8x_a100",
+			"started_at":              iso(old),
+			"finished_at":             iso(old.Add(time.Hour)),
+			"outcome":                 "success",
+			"current_state":           "COMPLETED",
+			"gpu_rate_cents_per_hour": 1592,
+		})
+	})
+	resp := callCost(t, makeCostHandler(t, state), "window=30d")
 	if len(resp.Experiments) != 0 {
 		t.Fatalf("expected 0 experiments in window, got %d", len(resp.Experiments))
 	}
 }
 
+// TestRunWithoutRateAndNoFallbackContributesNil covers a submit whose
+// ``gpu_rate_cents_per_hour`` is NULL (e.g., Lambda outage at acquire
+// time, or a backfilled legacy submit). The version must still surface
+// — its Cents pointer must be nil so the frontend renders "—".
 func TestRunWithoutRateAndNoFallbackContributesNil(t *testing.T) {
-	// No rate tag on the Aim run AND no state file to back-fill from.
-	// Frontend renders "—" via cents=nil; the version still surfaces.
 	start := time.Now().UTC().AddDate(0, 0, -5)
-	aim := fakeAim(t, []fakeRun{{
-		experiment:   "no-rate",
-		hash:         "abc",
-		creationTime: unixSecs(start),
-		endTime:      unixSecs(start.Add(time.Hour)),
-		tags:         tagSet("no-rate", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_unknown", "success", nil),
-	}})
-	resp := callCost(t, makeHandlerWithAim(t, aim), "window=30d")
+	state := makeStateReaderWith(t, func(db *sql.DB) {
+		insertSubmit(t, db, map[string]any{
+			"experiment_name": "no-rate",
+			"version":         "v1",
+			"submitted_by":    "alice",
+			"backend":         "lambda",
+			"gpu_type":        "gpu_unknown",
+			"started_at":      iso(start),
+			"finished_at":     iso(start.Add(time.Hour)),
+			"outcome":         "success",
+			"current_state":   "COMPLETED",
+			// gpu_rate_cents_per_hour intentionally absent → NULL
+		})
+	})
+	resp := callCost(t, makeCostHandler(t, state), "window=30d")
 	if len(resp.Experiments) != 1 {
 		t.Fatalf("expected 1 experiment, got %d", len(resp.Experiments))
 	}
 	exp := resp.Experiments[0]
 	if exp.TotalCents != 0 {
-		t.Fatalf("no-rate run should have 0 cents, got %d", exp.TotalCents)
+		t.Fatalf("no-rate submit should have 0 cents, got %d", exp.TotalCents)
 	}
 	if len(exp.Versions) != 1 {
 		t.Fatalf("expected 1 version row, got %d", len(exp.Versions))
@@ -263,17 +193,26 @@ func TestRunWithoutRateAndNoFallbackContributesNil(t *testing.T) {
 	}
 }
 
+// TestLocalBackendZeroRateZeroContribution covers the "free" path:
+// LocalExecutor writes rate=0 (not NULL) so the run counts but
+// contributes nothing to spend totals.
 func TestLocalBackendZeroRateZeroContribution(t *testing.T) {
 	start := time.Now().UTC().AddDate(0, 0, -2)
-	zero := 0
-	aim := fakeAim(t, []fakeRun{{
-		experiment:   "local-smoke",
-		hash:         "abc",
-		creationTime: unixSecs(start),
-		endTime:      unixSecs(start.Add(30 * time.Minute)),
-		tags:         tagSet("local-smoke", "v1", "11111111-1111-4111-8111-111111111111", "alice", "local", "success", &zero),
-	}})
-	resp := callCost(t, makeHandlerWithAim(t, aim), "window=30d")
+	state := makeStateReaderWith(t, func(db *sql.DB) {
+		insertSubmit(t, db, map[string]any{
+			"experiment_name":         "local-smoke",
+			"version":                 "v1",
+			"submitted_by":            "alice",
+			"backend":                 "local",
+			"gpu_type":                "local",
+			"started_at":              iso(start),
+			"finished_at":             iso(start.Add(30 * time.Minute)),
+			"outcome":                 "success",
+			"current_state":           "COMPLETED",
+			"gpu_rate_cents_per_hour": 0,
+		})
+	})
+	resp := callCost(t, makeCostHandler(t, state), "window=30d")
 	if resp.TotalCents != 0 {
 		t.Fatalf("local backend should contribute 0 to total, got %d", resp.TotalCents)
 	}
@@ -287,26 +226,38 @@ func TestLocalBackendZeroRateZeroContribution(t *testing.T) {
 
 // --- Happy path ------------------------------------------------------------
 
+// TestTotalAndPercentages: two submits, two submitters, sanity-check
+// the sum and the dominant-spender ordering.
 func TestTotalAndPercentages(t *testing.T) {
 	start1 := time.Now().UTC().AddDate(0, 0, -3)
 	start2 := time.Now().UTC().AddDate(0, 0, -2)
-	aim := fakeAim(t, []fakeRun{
-		{
-			experiment:   "run-a",
-			hash:         "h1",
-			creationTime: unixSecs(start1),
-			endTime:      unixSecs(start1.Add(2 * time.Hour)),
-			tags:         tagSet("run-a", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", intPtr(1592)),
-		},
-		{
-			experiment:   "run-b",
-			hash:         "h2",
-			creationTime: unixSecs(start2),
-			endTime:      unixSecs(start2.Add(time.Hour)),
-			tags:         tagSet("run-b", "v1", "22222222-2222-4222-8222-222222222222", "bob", "gpu_8x_a100", "success", intPtr(1592)),
-		},
+	state := makeStateReaderWith(t, func(db *sql.DB) {
+		insertSubmit(t, db, map[string]any{
+			"experiment_name":         "run-a",
+			"version":                 "v1",
+			"submitted_by":            "alice",
+			"backend":                 "lambda",
+			"gpu_type":                "gpu_8x_a100",
+			"started_at":              iso(start1),
+			"finished_at":             iso(start1.Add(2 * time.Hour)),
+			"outcome":                 "success",
+			"current_state":           "COMPLETED",
+			"gpu_rate_cents_per_hour": 1592,
+		})
+		insertSubmit(t, db, map[string]any{
+			"experiment_name":         "run-b",
+			"version":                 "v1",
+			"submitted_by":            "bob",
+			"backend":                 "lambda",
+			"gpu_type":                "gpu_8x_a100",
+			"started_at":              iso(start2),
+			"finished_at":             iso(start2.Add(time.Hour)),
+			"outcome":                 "success",
+			"current_state":           "COMPLETED",
+			"gpu_rate_cents_per_hour": 1592,
+		})
 	})
-	resp := callCost(t, makeHandlerWithAim(t, aim), "window=30d&group_by=submitter")
+	resp := callCost(t, makeCostHandler(t, state), "window=30d&group_by=submitter")
 	wantTotal := 3184 + 1592
 	if resp.TotalCents != wantTotal {
 		t.Fatalf("total: want %d, got %d", wantTotal, resp.TotalCents)
@@ -323,25 +274,37 @@ func TestTotalAndPercentages(t *testing.T) {
 	}
 }
 
+// TestGroupByDimensionRespected confirms the URL param actually
+// switches the breakdown axis (not just the column name).
 func TestGroupByDimensionRespected(t *testing.T) {
 	start := time.Now().UTC().AddDate(0, 0, -2)
-	aim := fakeAim(t, []fakeRun{
-		{
-			experiment:   "a",
-			hash:         "h1",
-			creationTime: unixSecs(start),
-			endTime:      unixSecs(start.Add(time.Hour)),
-			tags:         tagSet("a", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", intPtr(1592)),
-		},
-		{
-			experiment:   "b",
-			hash:         "h2",
-			creationTime: unixSecs(start),
-			endTime:      unixSecs(start.Add(time.Hour)),
-			tags:         tagSet("b", "v1", "22222222-2222-4222-8222-222222222222", "alice", "gpu_1x_a10", "success", intPtr(129)),
-		},
+	state := makeStateReaderWith(t, func(db *sql.DB) {
+		insertSubmit(t, db, map[string]any{
+			"experiment_name":         "a",
+			"version":                 "v1",
+			"submitted_by":            "alice",
+			"backend":                 "lambda",
+			"gpu_type":                "gpu_8x_a100",
+			"started_at":              iso(start),
+			"finished_at":             iso(start.Add(time.Hour)),
+			"outcome":                 "success",
+			"current_state":           "COMPLETED",
+			"gpu_rate_cents_per_hour": 1592,
+		})
+		insertSubmit(t, db, map[string]any{
+			"experiment_name":         "b",
+			"version":                 "v1",
+			"submitted_by":            "alice",
+			"backend":                 "lambda",
+			"gpu_type":                "gpu_1x_a10",
+			"started_at":              iso(start),
+			"finished_at":             iso(start.Add(time.Hour)),
+			"outcome":                 "success",
+			"current_state":           "COMPLETED",
+			"gpu_rate_cents_per_hour": 129,
+		})
 	})
-	resp := callCost(t, makeHandlerWithAim(t, aim), "window=30d&group_by=gpu_type")
+	resp := callCost(t, makeCostHandler(t, state), "window=30d&group_by=gpu_type")
 	if resp.Breakdown.Dimension != "gpu_type" {
 		t.Fatalf("expected dimension gpu_type, got %q", resp.Breakdown.Dimension)
 	}
@@ -350,16 +313,26 @@ func TestGroupByDimensionRespected(t *testing.T) {
 	}
 }
 
+// TestStackByNoneFunnelsToAll: with stack=none, every day-bucket with
+// spend must have its contribution keyed under "all" so the frontend
+// can render an unstacked total bar.
 func TestStackByNoneFunnelsToAll(t *testing.T) {
 	start := time.Now().UTC().AddDate(0, 0, -2)
-	aim := fakeAim(t, []fakeRun{{
-		experiment:   "a",
-		hash:         "h1",
-		creationTime: unixSecs(start),
-		endTime:      unixSecs(start.Add(time.Hour)),
-		tags:         tagSet("a", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", intPtr(1592)),
-	}})
-	resp := callCost(t, makeHandlerWithAim(t, aim), "window=30d&stack=none")
+	state := makeStateReaderWith(t, func(db *sql.DB) {
+		insertSubmit(t, db, map[string]any{
+			"experiment_name":         "a",
+			"version":                 "v1",
+			"submitted_by":            "alice",
+			"backend":                 "lambda",
+			"gpu_type":                "gpu_8x_a100",
+			"started_at":              iso(start),
+			"finished_at":             iso(start.Add(time.Hour)),
+			"outcome":                 "success",
+			"current_state":           "COMPLETED",
+			"gpu_rate_cents_per_hour": 1592,
+		})
+	})
+	resp := callCost(t, makeCostHandler(t, state), "window=30d&stack=none")
 	for _, b := range resp.TimeSeries {
 		if b.TotalCents > 0 {
 			if _, ok := b.ByDimension["all"]; !ok {
@@ -371,25 +344,37 @@ func TestStackByNoneFunnelsToAll(t *testing.T) {
 	t.Fatalf("no day with spend found")
 }
 
+// TestStackByGPUTypeProducesDistinctKeys: stack by a real dimension
+// must produce one key per distinct gpu_type that contributed.
 func TestStackByGPUTypeProducesDistinctKeys(t *testing.T) {
 	start := time.Now().UTC().AddDate(0, 0, -2)
-	aim := fakeAim(t, []fakeRun{
-		{
-			experiment:   "a",
-			hash:         "h1",
-			creationTime: unixSecs(start),
-			endTime:      unixSecs(start.Add(time.Hour)),
-			tags:         tagSet("a", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", intPtr(1592)),
-		},
-		{
-			experiment:   "b",
-			hash:         "h2",
-			creationTime: unixSecs(start),
-			endTime:      unixSecs(start.Add(time.Hour)),
-			tags:         tagSet("b", "v1", "22222222-2222-4222-8222-222222222222", "alice", "gpu_1x_a10", "success", intPtr(129)),
-		},
+	state := makeStateReaderWith(t, func(db *sql.DB) {
+		insertSubmit(t, db, map[string]any{
+			"experiment_name":         "a",
+			"version":                 "v1",
+			"submitted_by":            "alice",
+			"backend":                 "lambda",
+			"gpu_type":                "gpu_8x_a100",
+			"started_at":              iso(start),
+			"finished_at":             iso(start.Add(time.Hour)),
+			"outcome":                 "success",
+			"current_state":           "COMPLETED",
+			"gpu_rate_cents_per_hour": 1592,
+		})
+		insertSubmit(t, db, map[string]any{
+			"experiment_name":         "b",
+			"version":                 "v1",
+			"submitted_by":            "alice",
+			"backend":                 "lambda",
+			"gpu_type":                "gpu_1x_a10",
+			"started_at":              iso(start),
+			"finished_at":             iso(start.Add(time.Hour)),
+			"outcome":                 "success",
+			"current_state":           "COMPLETED",
+			"gpu_rate_cents_per_hour": 129,
+		})
 	})
-	resp := callCost(t, makeHandlerWithAim(t, aim), "window=30d&stack=gpu_type")
+	resp := callCost(t, makeCostHandler(t, state), "window=30d&stack=gpu_type")
 	for _, b := range resp.TimeSeries {
 		if b.TotalCents > 0 {
 			if len(b.ByDimension) < 2 {
@@ -401,6 +386,8 @@ func TestStackByGPUTypeProducesDistinctKeys(t *testing.T) {
 	t.Fatalf("no day with spend found")
 }
 
+// TestOutcomeNormalization: any non-success outcome buckets under
+// "failed"; only literal "success" survives as "success".
 func TestOutcomeNormalization(t *testing.T) {
 	start := time.Now().UTC().AddDate(0, 0, -2)
 	cases := []struct {
@@ -412,17 +399,23 @@ func TestOutcomeNormalization(t *testing.T) {
 		{"stopped", "stopped"},
 		{"failure", "failure"},
 	}
-	var runs []fakeRun
-	for i, c := range cases {
-		runs = append(runs, fakeRun{
-			experiment:   c.name + fmt.Sprintf("%d", i),
-			hash:         fmt.Sprintf("h%d", i),
-			creationTime: unixSecs(start),
-			endTime:      unixSecs(start.Add(time.Hour)),
-			tags:         tagSet(c.name+fmt.Sprintf("%d", i), "v1", fmt.Sprintf("%08d-0000-4000-8000-000000000000", i), "alice", "gpu_8x_a100", c.outcome, intPtr(1592)),
-		})
-	}
-	resp := callCost(t, makeHandlerWithAim(t, fakeAim(t, runs)), "window=30d&group_by=outcome")
+	state := makeStateReaderWith(t, func(db *sql.DB) {
+		for i, c := range cases {
+			insertSubmit(t, db, map[string]any{
+				"experiment_name":         fmt.Sprintf("%s%d", c.name, i),
+				"version":                 "v1",
+				"submitted_by":            "alice",
+				"backend":                 "lambda",
+				"gpu_type":                "gpu_8x_a100",
+				"started_at":              iso(start),
+				"finished_at":             iso(start.Add(time.Hour)),
+				"outcome":                 c.outcome,
+				"current_state":           "COMPLETED",
+				"gpu_rate_cents_per_hour": 1592,
+			})
+		}
+	})
+	resp := callCost(t, makeCostHandler(t, state), "window=30d&group_by=outcome")
 	keys := map[string]int{}
 	for _, r := range resp.Breakdown.Rows {
 		keys[r.Key] = r.Submits
@@ -432,16 +425,26 @@ func TestOutcomeNormalization(t *testing.T) {
 	}
 }
 
+// TestPriorTotalSuppressedOnAllWindow: the frontend hides the
+// delta-vs-prior chip when the user is viewing all-time; the API must
+// signal that by returning 0 for prior_total_cents.
 func TestPriorTotalSuppressedOnAllWindow(t *testing.T) {
 	start := time.Now().UTC().AddDate(0, 0, -2)
-	aim := fakeAim(t, []fakeRun{{
-		experiment:   "a",
-		hash:         "h1",
-		creationTime: unixSecs(start),
-		endTime:      unixSecs(start.Add(time.Hour)),
-		tags:         tagSet("a", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", intPtr(1592)),
-	}})
-	resp := callCost(t, makeHandlerWithAim(t, aim), "window=all")
+	state := makeStateReaderWith(t, func(db *sql.DB) {
+		insertSubmit(t, db, map[string]any{
+			"experiment_name":         "a",
+			"version":                 "v1",
+			"submitted_by":            "alice",
+			"backend":                 "lambda",
+			"gpu_type":                "gpu_8x_a100",
+			"started_at":              iso(start),
+			"finished_at":             iso(start.Add(time.Hour)),
+			"outcome":                 "success",
+			"current_state":           "COMPLETED",
+			"gpu_rate_cents_per_hour": 1592,
+		})
+	})
+	resp := callCost(t, makeCostHandler(t, state), "window=all")
 	if resp.PriorTotalCents != 0 {
 		t.Fatalf("prior_total_cents must be 0 for 'all' window, got %d", resp.PriorTotalCents)
 	}
@@ -450,32 +453,43 @@ func TestPriorTotalSuppressedOnAllWindow(t *testing.T) {
 	}
 }
 
-// --- v1.7.4-specific: per-version + legacy rate fallback -------------------
+// --- Multi-version -------------------------------------------------
 
+// TestMultipleVersionsOfSameExperiment: same experiment_name, two
+// versions → one CostExperimentEntry with two CostVersionEntry rows.
+// Confirms the bug v1.7.4 fixed (state files overwrote v1 with v2)
+// stays fixed under the SQLite shape — UNIQUE(experiment_name, version)
+// guarantees both rows survive.
 func TestMultipleVersionsOfSameExperiment(t *testing.T) {
-	// Same astrolabe.experiment, different astrolabe.version → one
-	// CostExperimentEntry with two version rows. This is the bug
-	// v1.7.4 fixes: pre-fix the state file overwrote v1 with v2 and
-	// the cost page silently underreported spend.
 	start1 := time.Now().UTC().AddDate(0, 0, -5)
 	start2 := time.Now().UTC().AddDate(0, 0, -2)
-	aim := fakeAim(t, []fakeRun{
-		{
-			experiment:   "exp1",
-			hash:         "h1",
-			creationTime: unixSecs(start1),
-			endTime:      unixSecs(start1.Add(2 * time.Hour)),
-			tags:         tagSet("exp1", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "failure", intPtr(1592)),
-		},
-		{
-			experiment:   "exp1",
-			hash:         "h2",
-			creationTime: unixSecs(start2),
-			endTime:      unixSecs(start2.Add(time.Hour)),
-			tags:         tagSet("exp1", "v2", "22222222-2222-4222-8222-222222222222", "alice", "gpu_8x_a100", "success", intPtr(1592)),
-		},
+	state := makeStateReaderWith(t, func(db *sql.DB) {
+		insertSubmit(t, db, map[string]any{
+			"experiment_name":         "exp1",
+			"version":                 "v1",
+			"submitted_by":            "alice",
+			"backend":                 "lambda",
+			"gpu_type":                "gpu_8x_a100",
+			"started_at":              iso(start1),
+			"finished_at":             iso(start1.Add(2 * time.Hour)),
+			"outcome":                 "failure",
+			"current_state":           "FAILED",
+			"gpu_rate_cents_per_hour": 1592,
+		})
+		insertSubmit(t, db, map[string]any{
+			"experiment_name":         "exp1",
+			"version":                 "v2",
+			"submitted_by":            "alice",
+			"backend":                 "lambda",
+			"gpu_type":                "gpu_8x_a100",
+			"started_at":              iso(start2),
+			"finished_at":             iso(start2.Add(time.Hour)),
+			"outcome":                 "success",
+			"current_state":           "COMPLETED",
+			"gpu_rate_cents_per_hour": 1592,
+		})
 	})
-	resp := callCost(t, makeHandlerWithAim(t, aim), "window=30d")
+	resp := callCost(t, makeCostHandler(t, state), "window=30d")
 	if len(resp.Experiments) != 1 {
 		t.Fatalf("expected 1 experiment, got %d", len(resp.Experiments))
 	}
@@ -499,101 +513,3 @@ func TestMultipleVersionsOfSameExperiment(t *testing.T) {
 		t.Fatalf("v2 outcome: want success, got %q", exp.Versions[1].Outcome)
 	}
 }
-
-func TestRunWithoutRateTagSurfacesAsUnresolved(t *testing.T) {
-	// The state-file rate fallback that pre-dated v1.7.5 is gone (per
-	// plans/state-files-to-sqlite.md — rate lives exclusively on the
-	// engine-written metadata Aim run now). A run lacking
-	// astrolabe.gpu_rate_cents_per_hour still counts in submit/hour
-	// totals, but contributes 0 to TotalCents and renders as "—" in
-	// the UI.
-	start := time.Now().UTC().AddDate(0, 0, -2)
-	aim := fakeAim(t, []fakeRun{{
-		experiment:   "legacy",
-		hash:         "h1",
-		creationTime: unixSecs(start),
-		endTime:      unixSecs(start.Add(time.Hour)),
-		tags:         tagSet("legacy", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", nil),
-	}})
-	resp := callCost(t, makeHandlerWithAim(t, aim), "window=30d")
-	if resp.TotalCents != 0 {
-		t.Fatalf("unresolved rate must contribute 0 cents, got %d", resp.TotalCents)
-	}
-	// Submit still counts even without a rate.
-	if len(resp.Experiments) != 1 {
-		t.Fatalf("want 1 experiment row, got %d", len(resp.Experiments))
-	}
-	if v := resp.Experiments[0].Versions[0].Cents; v != nil {
-		t.Fatalf("Cents must be nil for unresolved rate, got %v", v)
-	}
-}
-
-// --- v1.7.5: cost reads only engine-created metadata runs ------------------
-
-func TestOnlyMetadataRunsCounted(t *testing.T) {
-	// Aim sees four runs; only one (the metadata run) should count:
-	//   1. Engine-created metadata run → kind="metadata", counted.
-	//   2. Composer training run       → kind="training", excluded
-	//      (training metrics live elsewhere; cost is metadata only).
-	//   3. TB import                   → no kind tag (pre-v1.7.5),
-	//      excluded.
-	//   4. Manual Aim run              → no astrolabe.* tags at all,
-	//      excluded.
-	start := time.Now().UTC().AddDate(0, 0, -2)
-	runs := []fakeRun{
-		{
-			experiment:   "real",
-			hash:         "h1",
-			creationTime: unixSecs(start),
-			endTime:      unixSecs(start.Add(time.Hour)),
-			tags:         tagSet("real", "v1", "11111111-1111-4111-8111-111111111111", "alice", "gpu_8x_a100", "success", intPtr(1592)),
-		},
-		{
-			experiment:   "real", // same experiment, composer-side training run
-			hash:         "h2",
-			creationTime: unixSecs(start),
-			endTime:      unixSecs(start.Add(time.Hour)),
-			tags: map[string]any{
-				"astrolabe.experiment": "real",
-				"astrolabe.version":    "v1",
-				"astrolabe.submit_id":  "11111111-1111-4111-8111-111111111111",
-				"astrolabe.kind":       "training", // explicit non-metadata
-			},
-		},
-		{
-			experiment:   "tb-imported",
-			hash:         "h3",
-			creationTime: unixSecs(start),
-			endTime:      unixSecs(start.Add(time.Hour)),
-			tags: map[string]any{
-				"astrolabe.experiment": "tb-imported",
-				"astrolabe.version":    "v1",
-				"astrolabe.submit_id":  "tb-import-2026-04-30-foo",
-				// No kind tag — pre-v1.7.5 import has no metadata run
-				// representation; it's just excluded.
-			},
-		},
-		{
-			experiment:   "manual",
-			hash:         "h4",
-			creationTime: unixSecs(start),
-			endTime:      unixSecs(start.Add(time.Hour)),
-			tags:         map[string]any{},
-		},
-	}
-	resp := callCost(t, makeHandlerWithAim(t, fakeAim(t, runs)), "window=30d")
-	if len(resp.Experiments) != 1 {
-		t.Fatalf("expected exactly 1 experiment (the metadata run's), got %d: %+v",
-			len(resp.Experiments), resp.Experiments)
-	}
-	if resp.Experiments[0].Name != "real" {
-		t.Fatalf("expected real, got %q", resp.Experiments[0].Name)
-	}
-	if resp.TotalCents != 1592 {
-		t.Fatalf("composer-side training run inflated total: want 1592, got %d", resp.TotalCents)
-	}
-}
-
-// Suppress unused-import warning for net/url if the file ever drops
-// its only consumer (the cost handler calls url.Values internally).
-var _ = url.Values{}
