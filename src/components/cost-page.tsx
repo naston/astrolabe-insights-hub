@@ -128,10 +128,6 @@ export function CostPage() {
   const filterGpus = decodeList(search.f_gpu);
   const filterOutcomes = decodeList(search.f_outcome);
 
-  useEffect(() => {
-    document.title = "Astrolabe — Cost";
-  }, []);
-
   const { data, error, loading, lastUpdated } = usePolling(
     (signal) => api.cost({ window, group_by: groupBy, stack }, signal),
     [window, groupBy, stack],
