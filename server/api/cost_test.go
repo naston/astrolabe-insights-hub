@@ -513,3 +513,146 @@ func TestMultipleVersionsOfSameExperiment(t *testing.T) {
 		t.Fatalf("v2 outcome: want success, got %q", exp.Versions[1].Outcome)
 	}
 }
+
+// --- Billing window (Lambda-calibrated) ----------------------------------
+
+func TestBillingWindowUsesSetupToTerminalTransition(t *testing.T) {
+	// Reproduces the 06b-rtd-calibration v5 regression: engine-process
+	// elapsed (started_at → finished_at) overcounts because it includes
+	// scheduler queue + Lambda boot + cleanup. Real Lambda charge is
+	// from SETUP transition to first terminal-state transition.
+	//
+	// Setup the SETUP → FAILED window as 4 minutes; the engine-process
+	// window as 7 minutes. At 838c/hr the right answer is $0.56, the
+	// wrong answer would be $0.98.
+	started := time.Date(2026, 6, 2, 18, 56, 52, 0, time.UTC)
+	setupAt := time.Date(2026, 6, 2, 18, 59, 15, 0, time.UTC)
+	failedAt := time.Date(2026, 6, 2, 19, 3, 15, 0, time.UTC)
+	finishedAt := time.Date(2026, 6, 2, 19, 3, 50, 0, time.UTC)
+
+	state := makeStateReaderWith(t, func(db *sql.DB) {
+		insertSubmit(t, db, map[string]any{
+			"experiment_name":         "billing-window-test",
+			"version":                 "v1",
+			"submitted_by":            "nathan",
+			"backend":                 "lambda",
+			"gpu_type":                "gpu_2x_h100_sxm5",
+			"started_at":              started.Format(time.RFC3339Nano),
+			"finished_at":             finishedAt.Format(time.RFC3339Nano),
+			"outcome":                 "failure",
+			"current_state":           "FAILED",
+			"gpu_rate_cents_per_hour": 838,
+		})
+		// Drop FSM transitions matching the live shape on lake1.
+		sid := "test-billing-window-test-v1"
+		for _, tr := range []struct {
+			state string
+			at    time.Time
+		}{
+			{"PENDING", started},
+			{"ACQUIRING", started.Add(2 * time.Second)},
+			{"SETUP", setupAt},
+			{"RUNNING", setupAt.Add(7 * time.Second)},
+			{"SUMMARIZING", failedAt.Add(-3 * time.Second)},
+			{"FAILED", failedAt},
+		} {
+			_, err := db.Exec(
+				`INSERT INTO state_transitions (submit_id, state, at) VALUES (?, ?, ?)`,
+				sid, tr.state, tr.at.Format(time.RFC3339Nano),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+
+	resp := callCost(t, makeCostHandler(t, state), "window=all")
+	if len(resp.Experiments) != 1 {
+		t.Fatalf("expected 1 experiment, got %d", len(resp.Experiments))
+	}
+	v := resp.Experiments[0].Versions[0]
+	if v.Cents == nil {
+		t.Fatal("cents was nil")
+	}
+	// 838 * (240/3600) = 55.86 → truncated to 55 by int conversion.
+	if *v.Cents != 55 && *v.Cents != 56 {
+		t.Fatalf("billing window wrong: got %d cents, want 55-56 (838c/hr × 4min). "+
+			"If you see ~97-98 you're back on started_at→finished_at.", *v.Cents)
+	}
+}
+
+func TestBillingWindowFallbackForLegacyRows(t *testing.T) {
+	// Pre-SQLite imports have no state_transitions. billingWindow must
+	// fall back to (started_at, finished_at) so legacy data still renders
+	// — less accurate, but it's all we have.
+	start := time.Now().UTC().AddDate(0, 0, -3)
+	state := makeStateReaderWith(t, func(db *sql.DB) {
+		insertSubmit(t, db, map[string]any{
+			"experiment_name":         "legacy-no-transitions",
+			"version":                 "v1",
+			"submitted_by":            "alice",
+			"backend":                 "lambda",
+			"gpu_type":                "gpu_8x_a100",
+			"started_at":              start.Format(time.RFC3339Nano),
+			"finished_at":             start.Add(time.Hour).Format(time.RFC3339Nano),
+			"outcome":                 "success",
+			"current_state":           "COMPLETED",
+			"gpu_rate_cents_per_hour": 1592,
+		})
+		// Deliberately NOT inserting state_transitions rows.
+	})
+
+	resp := callCost(t, makeCostHandler(t, state), "window=30d")
+	if len(resp.Experiments) != 1 {
+		t.Fatalf("expected 1 experiment, got %d", len(resp.Experiments))
+	}
+	v := resp.Experiments[0].Versions[0]
+	if v.Cents == nil || *v.Cents != 1592 {
+		t.Fatalf("legacy fallback wrong: want 1592c (1h × 15.92/hr), got %v", v.Cents)
+	}
+}
+
+func TestBillingWindowDropsSubmitsThatNeverReachedSetup(t *testing.T) {
+	// A submit that failed during ACQUIRING (Lambda launch failed)
+	// never billed by Lambda. Modern row (has state_transitions) but no
+	// SETUP transition → drop from cost view entirely. Without this,
+	// failed launches would inflate submit/hour counts in the
+	// breakdown.
+	start := time.Now().UTC().AddDate(0, 0, -1)
+	state := makeStateReaderWith(t, func(db *sql.DB) {
+		insertSubmit(t, db, map[string]any{
+			"experiment_name":         "launch-failed",
+			"version":                 "v1",
+			"submitted_by":            "alice",
+			"backend":                 "lambda",
+			"gpu_type":                "gpu_8x_a100",
+			"started_at":              start.Format(time.RFC3339Nano),
+			"finished_at":             start.Add(30 * time.Second).Format(time.RFC3339Nano),
+			"outcome":                 "failure",
+			"current_state":           "FAILED",
+			"gpu_rate_cents_per_hour": 1592,
+		})
+		sid := "test-launch-failed-v1"
+		for _, tr := range []struct {
+			state string
+			at    time.Time
+		}{
+			{"PENDING", start},
+			{"ACQUIRING", start.Add(1 * time.Second)},
+			{"FAILED", start.Add(30 * time.Second)},
+		} {
+			_, err := db.Exec(
+				`INSERT INTO state_transitions (submit_id, state, at) VALUES (?, ?, ?)`,
+				sid, tr.state, tr.at.Format(time.RFC3339Nano),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+
+	resp := callCost(t, makeCostHandler(t, state), "window=30d")
+	if len(resp.Experiments) != 0 {
+		t.Fatalf("expected 0 experiments (failed-before-SETUP dropped), got %d", len(resp.Experiments))
+	}
+}
