@@ -770,3 +770,82 @@ func TestTimeSeriesIncludesTodayBucket(t *testing.T) {
 		t.Errorf("7d window should produce 8 buckets (today + 7 prior), got %d", len(resp.TimeSeries))
 	}
 }
+
+func TestTimeSeriesBucketingIsTZAware(t *testing.T) {
+	// A run started at 06-02T03:00:00Z is "late evening 06-01" in
+	// US-Central (UTC-5/-6). With ?tz=America/Chicago the spend
+	// belongs in the 2026-06-01 bucket, NOT 2026-06-02. Same row
+	// with no tz (defaults to UTC) lands in 06-02.
+	state := makeStateReaderWith(t, func(db *sql.DB) {
+		insertSubmit(t, db, map[string]any{
+			"experiment_name":         "tz-edge",
+			"version":                 "v1",
+			"submitted_by":            "alice",
+			"backend":                 "lambda",
+			"gpu_type":                "gpu_1x_a10",
+			"started_at":              "2026-06-02T03:00:00Z",
+			"finished_at":             "2026-06-02T03:30:00Z",
+			"outcome":                 "success",
+			"current_state":           "COMPLETED",
+			"gpu_rate_cents_per_hour": 129,
+		})
+		// SETUP + terminal transitions so billingWindow accepts the row.
+		for _, tr := range []struct{ state, at string }{
+			{"SETUP", "2026-06-02T03:00:00Z"},
+			{"COMPLETED", "2026-06-02T03:30:00Z"},
+		} {
+			if _, err := db.Exec(
+				`INSERT INTO state_transitions (submit_id, state, at) VALUES (?, ?, ?)`,
+				"test-tz-edge-v1", tr.state, tr.at,
+			); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+
+	respUTC := callCost(t, makeCostHandler(t, state), "window=all")
+	if !bucketHasSpend(respUTC, "2026-06-02") {
+		t.Errorf("UTC bucketing: expected 2026-06-02 to have spend; non-zero buckets: %v",
+			nonzeroBuckets(respUTC))
+	}
+
+	respChi := callCost(t, makeCostHandler(t, state), "window=all&tz=America/Chicago")
+	if !bucketHasSpend(respChi, "2026-06-01") {
+		t.Errorf("Chicago bucketing: 06-02T03:00Z = 06-01T22:00 CDT, should land in 2026-06-01; "+
+			"non-zero buckets: %v", nonzeroBuckets(respChi))
+	}
+	if bucketHasSpend(respChi, "2026-06-02") {
+		t.Errorf("Chicago bucketing: 2026-06-02 should NOT carry this spend — it's CDT 06-01")
+	}
+}
+
+func bucketHasSpend(resp CostResponse, date string) bool {
+	for _, b := range resp.TimeSeries {
+		if b.Start == date && b.TotalCents > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func nonzeroBuckets(resp CostResponse) []string {
+	out := make([]string, 0, len(resp.TimeSeries))
+	for _, b := range resp.TimeSeries {
+		if b.TotalCents > 0 {
+			out = append(out, b.Start)
+		}
+	}
+	return out
+}
+
+func TestParseTZParamUnknownFallsBackToUTC(t *testing.T) {
+	if loc := parseTZParam("Not/A/Zone"); loc != time.UTC {
+		t.Errorf("unknown tz should fall back to UTC, got %v", loc)
+	}
+	if loc := parseTZParam(""); loc != time.UTC {
+		t.Errorf("empty tz should fall back to UTC, got %v", loc)
+	}
+	if loc := parseTZParam("America/Chicago"); loc == time.UTC {
+		t.Errorf("valid IANA name should not fall back to UTC")
+	}
+}

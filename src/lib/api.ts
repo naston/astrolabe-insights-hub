@@ -140,6 +140,13 @@ export const api = {
         if (params.window) qs.set("window", params.window);
         if (params.group_by) qs.set("group_by", params.group_by);
         if (params.stack) qs.set("stack", params.stack);
+        // Pass the viewer's IANA timezone so the server buckets
+        // daily costs by the viewer's calendar days, not UTC's.
+        // Without this a Texas user sees "Jun 1" as the last
+        // bucket on a Jun 2 afternoon because UTC has already
+        // rolled to a date the local clock hasn't reached.
+        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        if (tz) qs.set("tz", tz);
         const q = qs.toString();
         return getJSON<CostResponse>(`/cost${q ? `?${q}` : ""}`, signal);
       },
