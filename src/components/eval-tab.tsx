@@ -1,10 +1,9 @@
 /**
  * Eval tab — renders benchmark results for the runs currently in scope.
  *
- * Scaffolded against MOCK DATA so the layout can be critiqued before
- * the producer-side helper (``astrolabe.eval_results.log_eval_table``)
- * and the Go API endpoint (``/api/runs/evals``) land. Swap
- * ``useMockEvals`` for the real fetch hook when they do.
+ * Producer-side helper is ``astrolabe_callbacks.log_eval_table`` (and
+ * ``start_eval_run`` for multi-step traces). Wired to the live API
+ * endpoints ``/api/runs/<hash>/evals``, ``/info``, and ``/metrics/...``.
  *
  * Design — see plans/eval-runs.md:
  *   * Two block types dispatched by data shape: TableBlock (all step=0)
@@ -18,6 +17,15 @@
  *   * Currently-viewed run is highlighted with a small dot.
  */
 import { useEffect, useMemo, useState } from "react";
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import type { ComparisonRunPick } from "@/components/comparison-modal";
 import type { Run } from "@/lib/types";
 import { api } from "@/lib/api";
@@ -546,7 +554,12 @@ function EvalTraceBlock({
               <span className="opacity-60">·</span>
               <span>{chart.metric}</span>
             </div>
-            <MiniTraceChart lines={chart.lines} runColors={runColors} currentRunHash={currentRunHash} />
+            <EvalTraceChart
+              lines={chart.lines}
+              runs={runs}
+              runColors={runColors}
+              currentRunHash={currentRunHash}
+            />
             <ul className="mt-2 flex flex-wrap gap-3 text-[10px] font-mono">
               {chart.lines.map((line) => {
                 const run = runs.find((r) => r.hash === line.runHash);
@@ -573,88 +586,118 @@ function EvalTraceBlock({
 }
 
 /**
- * Inline-SVG trace renderer — intentionally simple so the layout can be
- * critiqued without reaching for Recharts. Real wiring uses the existing
- * MetricChart component which already handles tooltips, zoom, etc.
+ * Recharts-backed trace chart for the Eval tab. Lighter than
+ * MetricChart (no zoom/poll/x-axis-mode-toggle — eval traces are
+ * usually a handful of checkpoint-step points, not the dense training
+ * step series) but uses the same theme variables and tooltip shape so
+ * eval and training charts read consistently. Y-axis auto-fits even
+ * on constant series — Recharts handles min==max without the
+ * special-case "center the flat line" logic the previous hand-rolled
+ * SVG needed.
  */
-function MiniTraceChart({
+function EvalTraceChart({
   lines,
+  runs,
   runColors,
   currentRunHash,
 }: {
   lines: Array<{ runHash: string; series: Array<{ step: number; value: number }> }>;
+  runs: EvalTabProps["runs"];
   runColors: Record<string, string>;
   currentRunHash: string | undefined;
 }) {
-  // Compute bounds across all lines so all paths share an axis.
-  const { minStep, maxStep, minValue, maxValue } = useMemo(() => {
-    let minS = Infinity, maxS = -Infinity, minV = Infinity, maxV = -Infinity;
-    for (const line of lines) {
-      for (const pt of line.series) {
-        if (pt.step < minS) minS = pt.step;
-        if (pt.step > maxS) maxS = pt.step;
-        if (pt.value < minV) minV = pt.value;
-        if (pt.value > maxV) maxV = pt.value;
+  // Pivot per-line series into Recharts row shape:
+  //   [{ step: N, <hashA>: val, <hashB>: val, ... }, ...]
+  // Steps that aren't shared across all lines just leave the missing
+  // dataKey undefined; ``connectNulls`` keeps the line drawn through.
+  const data = useMemo(() => {
+    const stepSet = new Set<number>();
+    for (const line of lines) for (const pt of line.series) stepSet.add(pt.step);
+    const sortedSteps = Array.from(stepSet).sort((a, b) => a - b);
+    return sortedSteps.map((step) => {
+      const row: Record<string, number> = { step };
+      for (const line of lines) {
+        const pt = line.series.find((p) => p.step === step);
+        if (pt) row[line.runHash] = pt.value;
       }
-    }
-    return { minStep: minS, maxStep: maxS, minValue: minV, maxValue: maxV };
+      return row;
+    });
   }, [lines]);
 
-  const W = 600;
-  const H = 180;
-  const PAD = 8;
-
-  // Value range can be zero when every point of every line has the
-  // same value (e.g. an eval metric that didn't change between
-  // checkpoints, like CoLA matthews=0.02564 at both step 10 and 20).
-  // The old fallback ``Math.max(0.0001, 0)`` mapped all points to
-  // y=H-PAD, hiding the line against the bottom border. Center the
-  // line vertically when the range collapses — that way a flat trace
-  // is clearly visible, not "the chart is broken".
-  const valueRange = maxValue - minValue;
-  const valueIsConstant = !Number.isFinite(valueRange) || valueRange === 0;
-
-  const xs = (step: number) =>
-    PAD + ((step - minStep) / Math.max(1, maxStep - minStep)) * (W - 2 * PAD);
-  const ys = (value: number) => {
-    if (valueIsConstant) return H / 2;
-    return H - PAD - ((value - minValue) / valueRange) * (H - 2 * PAD);
-  };
+  // Hash → human-readable name for the tooltip. Falls back to short
+  // hash when a run isn't in the props list (e.g., older runs that
+  // aren't visible right now but have eval data plotted alongside).
+  const nameByHash = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const r of runs) map[r.hash] = r.name;
+    return map;
+  }, [runs]);
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-44 rounded-md border border-border bg-background/40">
-      {lines.map((line) => {
-        const color = runColors[line.runHash] ?? "#888";
-        const isCurrent = line.runHash === currentRunHash;
-        const path = line.series
-          .map((pt, idx) => `${idx === 0 ? "M" : "L"} ${xs(pt.step).toFixed(1)} ${ys(pt.value).toFixed(1)}`)
-          .join(" ");
-        return (
-          <path
-            key={line.runHash}
-            d={path}
-            fill="none"
-            stroke={color}
-            strokeWidth={isCurrent ? 2.4 : 1.4}
-            strokeOpacity={isCurrent ? 1 : 0.65}
+    <div className="w-full h-44 rounded-md border border-border bg-background/40">
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={data} margin={{ top: 12, right: 16, left: 8, bottom: 8 }}>
+          <CartesianGrid stroke="var(--border)" strokeDasharray="2 4" vertical={false} />
+          <XAxis
+            dataKey="step"
+            type="number"
+            domain={["auto", "auto"]}
+            allowDataOverflow
+            stroke="var(--muted-foreground)"
+            tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
           />
-        );
-      })}
-      {/* When every point shares one value the line is informative but
-          the number isn't visible anywhere else on the chart. Drop a
-          single text label so the reader knows what the flat line is at. */}
-      {valueIsConstant && Number.isFinite(minValue) && (
-        <text
-          x={W - PAD}
-          y={H / 2 - 4}
-          textAnchor="end"
-          className="fill-muted-foreground text-[10px]"
-          style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace" }}
-        >
-          {minValue.toFixed(4)}
-        </text>
-      )}
-    </svg>
+          <YAxis
+            stroke="var(--muted-foreground)"
+            tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
+            width={48}
+            domain={["auto", "auto"]}
+            allowDataOverflow
+          />
+          <Tooltip
+            cursor={{ stroke: "var(--border-strong)", strokeWidth: 1 }}
+            content={({ active, payload, label }) => {
+              if (!active || !payload?.length) return null;
+              return (
+                <div className="rounded-md border border-border bg-popover px-3 py-2 text-xs shadow-md">
+                  <div className="mb-1 font-mono text-muted-foreground">step {label}</div>
+                  {payload.map((p) => {
+                    const key = String(p.dataKey ?? "");
+                    const name = nameByHash[key] ?? key.slice(0, 8);
+                    const v = typeof p.value === "number" ? p.value.toFixed(4) : "—";
+                    return (
+                      <div key={key} className="flex items-center gap-2 font-mono">
+                        <span
+                          className="h-2 w-2 rounded-sm"
+                          style={{ backgroundColor: p.color as string }}
+                        />
+                        <span className="text-foreground">{name}</span>
+                        <span className="text-muted-foreground">{v}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            }}
+          />
+          {lines.map((line) => {
+            const isCurrent = line.runHash === currentRunHash;
+            return (
+              <Line
+                key={line.runHash}
+                type="monotone"
+                dataKey={line.runHash}
+                stroke={runColors[line.runHash] ?? "#888"}
+                strokeWidth={isCurrent ? 2.4 : 1.4}
+                strokeOpacity={isCurrent ? 1 : 0.65}
+                dot={{ r: 2.5 }}
+                isAnimationActive={false}
+                connectNulls
+              />
+            );
+          })}
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
   );
 }
 
