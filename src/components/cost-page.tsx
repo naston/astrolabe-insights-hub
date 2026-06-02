@@ -412,7 +412,18 @@ function CostChart({
           <XAxis
             dataKey="date"
             tickFormatter={(d) =>
-              new Date(d).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+              // The date key is a UTC ``YYYY-MM-DD`` string from the
+              // API. ``new Date("2026-05-26")`` parses as UTC midnight,
+              // and toLocaleDateString without ``timeZone: "UTC"``
+              // renders it in the viewer's local TZ — shifting every
+              // label one day earlier for any user west of UTC. Pin
+              // the format to UTC so what you see matches what the
+              // bucket actually represents.
+              new Date(d).toLocaleDateString(undefined, {
+                month: "short",
+                day: "numeric",
+                timeZone: "UTC",
+              })
             }
             className="text-xs"
             tick={{ fill: "currentColor" }}
@@ -432,7 +443,12 @@ function CostChart({
           />
           <Tooltip
             formatter={(v: number) => `$${v.toFixed(2)}`}
-            labelFormatter={(d) => new Date(d).toLocaleDateString()}
+            labelFormatter={(d) =>
+              // Pin to UTC for the same reason as the XAxis formatter
+              // above — the date key is a UTC YYYY-MM-DD, parsing as
+              // local would tooltip the wrong day for western viewers.
+              new Date(d).toLocaleDateString(undefined, { timeZone: "UTC" })
+            }
             contentStyle={{
               background: "var(--popover)",
               border: "1px solid var(--border)",

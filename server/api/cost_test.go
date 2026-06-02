@@ -741,3 +741,32 @@ func TestCostStateMatchesCurrentStateColumn(t *testing.T) {
 			got["missing-terminal-transition"])
 	}
 }
+
+// --- Time series bucket boundaries ----------------------------------------
+
+func TestTimeSeriesIncludesTodayBucket(t *testing.T) {
+	// Regression: ``for d := start; d.Before(end); d += 1d`` dropped
+	// the bucket containing the end timestamp. With start = now − 7d
+	// and end = now both at the same wall-clock hour, the loop added
+	// 7 buckets and stopped before reaching today's bucket — chart
+	// showed yesterday as the rightmost date even though the window
+	// nominally ended now.
+	state := makeStateReaderWith(t, func(db *sql.DB) {})
+	resp := callCost(t, makeCostHandler(t, state), "window=7d")
+	today := time.Now().UTC().Format("2006-01-02")
+	yesterday := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
+
+	if len(resp.TimeSeries) == 0 {
+		t.Fatal("time_series empty")
+	}
+	last := resp.TimeSeries[len(resp.TimeSeries)-1].Start
+	if last != today {
+		t.Fatalf("rightmost time-series bucket: want %s (today), got %s. "+
+			"If you see %s the loop is back to dropping the end day.",
+			today, last, yesterday)
+	}
+	// 7d window with day-inclusive iteration → 8 buckets (today + 7 prior days)
+	if len(resp.TimeSeries) != 8 {
+		t.Errorf("7d window should produce 8 buckets (today + 7 prior), got %d", len(resp.TimeSeries))
+	}
+}
