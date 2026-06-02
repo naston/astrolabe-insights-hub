@@ -656,3 +656,88 @@ func TestBillingWindowDropsSubmitsThatNeverReachedSetup(t *testing.T) {
 		t.Fatalf("expected 0 experiments (failed-before-SETUP dropped), got %d", len(resp.Experiments))
 	}
 }
+
+// --- State alignment with Home / Details ---------------------------------
+
+func TestCostStateMatchesCurrentStateColumn(t *testing.T) {
+	// Regression: previously cost.go derived state from
+	// (anyActive, outcome, ended) and would report "RUNNING" for any
+	// submit whose terminal transition was missing — even when the
+	// SQLite ``current_state`` clearly said COMPLETED. Home and Details
+	// read current_state directly; Cost must do the same, otherwise the
+	// three pages show different states for the same submit.
+	start := time.Now().UTC().AddDate(0, 0, -5)
+	state := makeStateReaderWith(t, func(db *sql.DB) {
+		// COMPLETED submit WITH proper transitions — Cost has always
+		// gotten this right.
+		insertSubmit(t, db, map[string]any{
+			"experiment_name":         "happy-path",
+			"version":                 "v1",
+			"submitted_by":            "alice",
+			"backend":                 "lambda",
+			"gpu_type":                "gpu_8x_a100",
+			"started_at":              start.Format(time.RFC3339Nano),
+			"finished_at":             start.Add(30 * time.Minute).Format(time.RFC3339Nano),
+			"outcome":                 "success",
+			"current_state":           "COMPLETED",
+			"gpu_rate_cents_per_hour": 1592,
+		})
+		sid := "test-happy-path-v1"
+		for _, tr := range []struct{ state, at string }{
+			{"PENDING", start.Format(time.RFC3339Nano)},
+			{"ACQUIRING", start.Format(time.RFC3339Nano)},
+			{"SETUP", start.Add(2 * time.Minute).Format(time.RFC3339Nano)},
+			{"RUNNING", start.Add(2 * time.Minute).Format(time.RFC3339Nano)},
+			{"SUMMARIZING", start.Add(30 * time.Minute).Format(time.RFC3339Nano)},
+			{"COMPLETED", start.Add(30 * time.Minute).Format(time.RFC3339Nano)},
+		} {
+			if _, err := db.Exec(
+				`INSERT INTO state_transitions (submit_id, state, at) VALUES (?, ?, ?)`,
+				sid, tr.state, tr.at,
+			); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		// COMPLETED submit WITH only a SETUP transition + no
+		// terminal transition recorded (the broken-importer case).
+		// Pre-fix: Cost reported RUNNING because ended was zero. Now:
+		// Cost should respect current_state = COMPLETED.
+		insertSubmit(t, db, map[string]any{
+			"experiment_name":         "missing-terminal-transition",
+			"version":                 "v1",
+			"submitted_by":            "alice",
+			"backend":                 "lambda",
+			"gpu_type":                "gpu_8x_a100",
+			"started_at":              start.Format(time.RFC3339Nano),
+			"finished_at":             start.Add(30 * time.Minute).Format(time.RFC3339Nano),
+			"outcome":                 "success",
+			"current_state":           "COMPLETED",
+			"gpu_rate_cents_per_hour": 1592,
+		})
+		sid2 := "test-missing-terminal-transition-v1"
+		if _, err := db.Exec(
+			`INSERT INTO state_transitions (submit_id, state, at) VALUES (?, 'SETUP', ?)`,
+			sid2, start.Add(2*time.Minute).Format(time.RFC3339Nano),
+		); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	resp := callCost(t, makeCostHandler(t, state), "window=30d")
+	got := map[string]string{}
+	for _, exp := range resp.Experiments {
+		for _, v := range exp.Versions {
+			got[exp.Name] = v.State
+		}
+	}
+	if got["happy-path"] != "COMPLETED" {
+		t.Errorf("happy-path: want COMPLETED, got %q", got["happy-path"])
+	}
+	if got["missing-terminal-transition"] != "COMPLETED" {
+		t.Errorf("missing-terminal-transition: cost must respect current_state, "+
+			"not infer from transitions — want COMPLETED, got %q. "+
+			"This is the bug where Cost said RUNNING while Home said COMPLETED.",
+			got["missing-terminal-transition"])
+	}
+}
