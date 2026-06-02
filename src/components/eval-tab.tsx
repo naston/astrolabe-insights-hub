@@ -604,10 +604,22 @@ function MiniTraceChart({
   const H = 180;
   const PAD = 8;
 
+  // Value range can be zero when every point of every line has the
+  // same value (e.g. an eval metric that didn't change between
+  // checkpoints, like CoLA matthews=0.02564 at both step 10 and 20).
+  // The old fallback ``Math.max(0.0001, 0)`` mapped all points to
+  // y=H-PAD, hiding the line against the bottom border. Center the
+  // line vertically when the range collapses — that way a flat trace
+  // is clearly visible, not "the chart is broken".
+  const valueRange = maxValue - minValue;
+  const valueIsConstant = !Number.isFinite(valueRange) || valueRange === 0;
+
   const xs = (step: number) =>
     PAD + ((step - minStep) / Math.max(1, maxStep - minStep)) * (W - 2 * PAD);
-  const ys = (value: number) =>
-    H - PAD - ((value - minValue) / Math.max(0.0001, maxValue - minValue)) * (H - 2 * PAD);
+  const ys = (value: number) => {
+    if (valueIsConstant) return H / 2;
+    return H - PAD - ((value - minValue) / valueRange) * (H - 2 * PAD);
+  };
 
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-44 rounded-md border border-border bg-background/40">
@@ -628,6 +640,20 @@ function MiniTraceChart({
           />
         );
       })}
+      {/* When every point shares one value the line is informative but
+          the number isn't visible anywhere else on the chart. Drop a
+          single text label so the reader knows what the flat line is at. */}
+      {valueIsConstant && Number.isFinite(minValue) && (
+        <text
+          x={W - PAD}
+          y={H / 2 - 4}
+          textAnchor="end"
+          className="fill-muted-foreground text-[10px]"
+          style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace" }}
+        >
+          {minValue.toFixed(4)}
+        </text>
+      )}
     </svg>
   );
 }
