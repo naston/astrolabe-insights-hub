@@ -91,6 +91,7 @@ type costRun struct {
 	GPUType     string
 	RateCents   int  // 0 if unresolved
 	HasRate     bool // distinguishes "free" (LocalExecutor → 0) from "unknown"
+	State       string // current_state from SQLite — the canonical FSM state, same as Home/Details
 	Outcome     string
 	SubmittedBy string
 	Repo        string
@@ -273,6 +274,7 @@ func (h *Handler) gatherCostRuns() ([]costRun, error) {
 			GPUType:     s.GPUType,
 			RateCents:   rateCents,
 			HasRate:     hasRate,
+			State:       s.State,
 			Outcome:     s.Outcome,
 			SubmittedBy: s.SubmittedBy,
 			Repo:        s.Repo,
@@ -341,6 +343,7 @@ func buildExperiments(runs []costRun, now time.Time) ([]CostExperimentEntry, int
 		gpuType   string
 		rateCents int
 		hasRate   bool
+		state     string // canonical current_state from SQLite — same value Home/Details show
 		outcome   string
 		started   time.Time
 		ended     time.Time
@@ -363,6 +366,7 @@ func buildExperiments(runs []costRun, now time.Time) ([]CostExperimentEntry, int
 				gpuType:   r.GPUType,
 				rateCents: r.RateCents,
 				hasRate:   r.HasRate,
+				state:     r.State,
 				outcome:   r.Outcome,
 				started:   r.Started,
 				ended:     r.Ended,
@@ -413,7 +417,17 @@ func buildExperiments(runs []costRun, now time.Time) ([]CostExperimentEntry, int
 			}
 			hours, hoursPtr := runHours(synth, now)
 			cents := computeRunCents(synth, now)
-			state := deriveStateFromVersion(v.anyActive, v.outcome, v.ended)
+			// State comes from the SQLite ``current_state`` column —
+			// the same value Home (/api/experiments) and Details
+			// (/api/experiments/{name}) render. Three pages, one
+			// source of truth. The handler used to infer state from
+			// (anyActive, outcome, ended) because the pre-SQLite
+			// implementation read Aim metadata runs that had no
+			// state column; that inference is dead code now and was
+			// the cause of "cost shows RUNNING while Home shows
+			// COMPLETED" for any submit whose terminal transition
+			// was missing or back-filled wrong.
+			state := v.state
 			outcome := v.outcome
 			if outcome == "" && !v.anyActive && !v.ended.IsZero() {
 				// Legacy terminal run with no outcome writeback —
@@ -449,27 +463,6 @@ func buildExperiments(runs []costRun, now time.Time) ([]CostExperimentEntry, int
 	return out, total
 }
 
-// deriveStateFromVersion gives the frontend a state hint per version.
-// Real FSM state lives on the submit row; for legacy / partial data
-// we infer:
-//   - in-flight (any run active)        → "RUNNING"
-//   - terminal + outcome=success        → "COMPLETED"
-//   - terminal + outcome present, !success → "FAILED"
-//   - terminal + no outcome (legacy)    → "COMPLETED" (best-faith;
-//     the row's outcome is empty, frontend renders "unknown")
-func deriveStateFromVersion(anyActive bool, outcome string, ended time.Time) string {
-	if anyActive || ended.IsZero() {
-		return "RUNNING"
-	}
-	switch outcome {
-	case "success":
-		return "COMPLETED"
-	case "":
-		return "COMPLETED"
-	default:
-		return "FAILED"
-	}
-}
 
 // resolveWindow maps a window label to (start, end, bucket, normalized label).
 // "all" reaches back 5 years — long enough to capture any realistic
