@@ -319,8 +319,15 @@ func (r *StateReader) listGitTags(submitID string) ([]string, error) {
 }
 
 func (r *StateReader) listTransitions(submitID string) ([]StateTransition, error) {
+	// ORDER BY at, then id for tiebreak. NOT by id alone — the state-file
+	// importer back-fills a synthetic current-state row at migration
+	// time, which gets a low id but a recent timestamp. Ordering by id
+	// would put that synthetic row first, breaking both the dashboard's
+	// FSM history strip and billingWindow's "first terminal after
+	// SETUP" computation (saw a 33-day window on legacy rows
+	// 2026-06-02 before this fix).
 	rows, err := r.db.Query(
-		`SELECT state, at FROM state_transitions WHERE submit_id = ? ORDER BY id`,
+		`SELECT state, at FROM state_transitions WHERE submit_id = ? ORDER BY at, id`,
 		submitID)
 	if err != nil {
 		return nil, fmt.Errorf("list state_transitions for %s: %w", submitID, err)

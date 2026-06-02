@@ -265,3 +265,66 @@ func TestStateReader_NullColumnsBecomeEmptyStrings(t *testing.T) {
 		t.Errorf("NULL repo: want \"\", got %q", s.Repo)
 	}
 }
+
+func TestStateReader_TransitionsAreChronological(t *testing.T) {
+	// Regression: the state-file importer back-fills a synthetic
+	// current-state row at migration time, which gets a LOW id (it was
+	// inserted before the originals during the bulk import) but a
+	// RECENT timestamp. ORDER BY id would put the synthetic row first,
+	// breaking the FSM history strip on the dashboard and producing
+	// 30+ day cost windows on legacy rows. Pin the chronological-order
+	// contract.
+	reader := makeStateReaderWith(t, func(db *sql.DB) {
+		insertSubmit(t, db, map[string]any{
+			"experiment_name": "history-order-test",
+			"version":         "v1",
+			"submitted_by":    "alice",
+			"backend":         "lambda",
+			"started_at":      "2026-04-27T21:18:00+00:00",
+			"finished_at":     "2026-04-27T21:25:33+00:00",
+			"outcome":         "success",
+			"current_state":   "COMPLETED",
+		})
+		sid := "test-history-order-test-v1"
+		// Insert SYNTHETIC migration row FIRST (low id, recent timestamp)
+		// to reproduce the bug. Then the legitimate older transitions
+		// (high id, older timestamps).
+		for _, tr := range []struct {
+			state, at string
+		}{
+			{"COMPLETED", "2026-05-30T22:49:35+00:00"}, // synthetic, low id
+			{"ACQUIRING", "2026-04-27T21:16:31+00:00"},
+			{"SETUP", "2026-04-27T21:20:34+00:00"},
+			{"RUNNING", "2026-04-27T21:20:41+00:00"},
+			{"SUMMARIZING", "2026-04-27T21:25:33+00:00"},
+			{"COMPLETED", "2026-04-27T21:25:35+00:00"}, // legitimate, high id
+		} {
+			if _, err := db.Exec(
+				`INSERT INTO state_transitions (submit_id, state, at) VALUES (?, ?, ?)`,
+				sid, tr.state, tr.at,
+			); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+
+	state, err := reader.GetState("history-order-test")
+	if err != nil {
+		t.Fatalf("GetState: %v", err)
+	}
+	if len(state.StateHistory) == 0 {
+		t.Fatal("StateHistory empty")
+	}
+	// The earliest transition by timestamp is ACQUIRING; the synthetic
+	// 2026-05-30 COMPLETED is the latest. Anything else means we're
+	// still ordering by id.
+	if state.StateHistory[0].State != "ACQUIRING" {
+		t.Fatalf("first transition: want ACQUIRING (chronological), got %q (likely ordering by id)",
+			state.StateHistory[0].State)
+	}
+	last := state.StateHistory[len(state.StateHistory)-1]
+	if last.At != "2026-05-30T22:49:35+00:00" {
+		t.Fatalf("last transition: want the 2026-05-30 synthetic row, got %s @ %s",
+			last.State, last.At)
+	}
+}
