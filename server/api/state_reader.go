@@ -107,7 +107,8 @@ const submitColumns = `
 	repo, ref, started_at, finished_at, outcome, current_state,
 	instance_id, instance_ip, current_step, total_steps,
 	current_step_label, healing_attempts, slack_thread_ts,
-	linear_doc_id, linear_doc_url, aim_metadata_run_hash, pid
+	linear_doc_id, linear_doc_url, aim_metadata_run_hash, pid,
+	gpu_rate_cents_per_hour, estimated_cost_cents
 `
 
 // ListAll returns every submit in the DB.
@@ -208,6 +209,7 @@ func scanSubmit(sc scanner) (*ExperimentState, string, error) {
 		startedAt                                                              string
 		currentStep, totalSteps, healingAttempts                               int
 		pid                                                                    sql.NullInt64
+		gpuRateCentsPerHour, estimatedCostCents                                sql.NullInt64
 	)
 	if err := sc.Scan(
 		&submitID, &experimentName, &version, &submittedBy, &backend, &gpuType,
@@ -215,6 +217,7 @@ func scanSubmit(sc scanner) (*ExperimentState, string, error) {
 		&instanceID, &instanceIP, &currentStep, &totalSteps,
 		&currentStepLabel, &healingAttempts, &slackThreadTS,
 		&linearDocID, &linearDocURL, &aimMetadataRunHash, &pid,
+		&gpuRateCentsPerHour, &estimatedCostCents,
 	); err != nil {
 		return nil, "", err
 	}
@@ -241,6 +244,14 @@ func scanSubmit(sc scanner) (*ExperimentState, string, error) {
 		Version:          version,
 		SubmitID:         submitID,
 		SubmittedBy:      submittedBy,
+	}
+	if gpuRateCentsPerHour.Valid {
+		v := int(gpuRateCentsPerHour.Int64)
+		s.GPURateCentsPerHour = &v
+	}
+	if estimatedCostCents.Valid {
+		v := int(estimatedCostCents.Int64)
+		s.EstimatedCostCents = &v
 	}
 	return s, submitID, nil
 }

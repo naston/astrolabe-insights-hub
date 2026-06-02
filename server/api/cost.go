@@ -1,54 +1,30 @@
 package api
 
-// Cost endpoint. Renders the dashboard's /cost page driven from Aim
-// runs (one per submit version), with state files joined in only for
-// per-experiment metadata (repo, backend) that doesn't vary across
-// versions of the same experiment.
+// Cost endpoint. Renders the dashboard's /cost page driven from the
+// astrolabe state SQLite database — one ``submits`` row per submit
+// version is the source of truth for everything cost-related (rate,
+// gpu_type, outcome, backend, repo, submitter, wall window).
 //
-// History: pre-v1.7.4 this read solely from state files, which made
-// the page show only the LATEST version per experiment — state files
-// are last-write-wins. v1.7.4 added gpu_type, rate, and outcome tags
-// to AIM_RUN_TAGS plus a terminal-state Aim writeback, so per-version
-// spend can now be derived from Aim. State files retain their original
-// role: snapshot of the latest submit, source of FSM state + repo for
-// the dashboard's home page.
+// History: pre-v1.7.4 this read state files (last-write-wins, hid
+// non-latest versions); v1.7.4 moved to per-version Aim "metadata"
+// runs; v1.8 moved it again — this time off Aim entirely, because
+// engine-side writes to a shared Aim repo deadlocked on RocksDB
+// cross-process flushes whenever the dashboard read concurrently. The
+// fix lifted cost fields into the ``submits`` table directly, so the
+// engine never touches Aim for cost data and the dashboard reads from
+// SQLite (WAL: concurrent readers + a single writer, no contention).
 //
-// Rate fallback for pre-v1.7.4 Aim runs: the handler builds a
-// gpu_type → rate map from state files (which were backfilled by
-// `astrolabe admin backfill-cost-rates`) and applies it to any Aim
-// run lacking astrolabe.gpu_rate_cents_per_hour. Runs whose gpu_type
-// isn't in the map render with cents=null in the response and "—" in
-// the UI.
+// The downstream aggregation (filterByWindow, runHours, computeRunCents,
+// buildExperiments, buildTimeSeriesFromRuns, buildBreakdownFromRuns) is
+// unchanged from the Aim-era; it operates on a ``costRun`` shape that
+// no longer cares where the rows came from.
 
 import (
 	"encoding/json"
 	"net/http"
 	"sort"
-	"sync"
 	"time"
 )
-
-// isCostMetadataRun identifies engine-created Aim runs that hold cost
-// metadata — the only runs the cost handler counts.
-//
-// The engine creates one of these per submit at acquire-success time
-// and closes it at terminal state. It carries all the cost-relevant
-// tags (gpu_type, rate, repo, backend, outcome) and its
-// creation_time → end_time bracket reflects instance hold time —
-// exactly what Lambda charges for.
-//
-// Discriminator: ``astrolabe.kind="metadata"``. Composer-created
-// training runs (kind empty or "training") and TB-import backfills
-// both lack this tag and are correctly excluded. Manual Aim runs
-// have no astrolabe.* tags at all and are also excluded.
-//
-// This decouples cost tracking from the composer callback — even
-// raw-PyTorch training that never logs to Aim still gets counted
-// because the metadata run exists regardless of what the training
-// process does.
-func isCostMetadataRun(tags AstrolabeTags) bool {
-	return tags.Kind == "metadata"
-}
 
 // CostResponse mirrors astrolabe-insights-hub/src/lib/types.ts. All
 // money in integer cents; the frontend formats with the standard
@@ -70,7 +46,7 @@ type CostWindow struct {
 }
 
 type CostTimeBucket struct {
-	Start       string         `json:"start"`        // ISO-8601 date
+	Start       string         `json:"start"` // ISO-8601 date
 	TotalCents  int            `json:"total_cents"`
 	ByDimension map[string]int `json:"by_dimension"` // dimension key → cents
 }
@@ -105,8 +81,9 @@ type CostVersionEntry struct {
 	EstimatedCents int      `json:"estimated_cents"` // always populated
 }
 
-// costRun is the per-Aim-run record the cost handler operates on.
-// Built from Aim's REST API; all dimensions live on the run's tags.
+// costRun is the per-submit record the cost handler operates on, built
+// from one ``submits`` row. All dimensions come straight off the row;
+// no joins, no fan-out.
 type costRun struct {
 	Experiment  string
 	Version     string
@@ -120,7 +97,7 @@ type costRun struct {
 	Backend     string
 	Started     time.Time
 	Ended       time.Time
-	Active      bool // Ended is zero
+	Active      bool // finished_at empty / Ended zero
 }
 
 // HandleCost serves GET /api/cost. Query params:
@@ -149,15 +126,15 @@ func (h *Handler) HandleCost(w http.ResponseWriter, r *http.Request) {
 		Experiments: []CostExperimentEntry{},
 	}
 
-	if h.aim == nil {
+	if h.state == nil {
 		writeJSON(w, empty)
 		return
 	}
 
 	allRuns, err := h.gatherCostRuns()
 	if err != nil {
-		// Aim unreachable — render empty rather than 500. Cost is
-		// derived data; a transient Aim outage shouldn't 5xx the page.
+		// State DB unreachable — render empty rather than 500. Cost is
+		// derived data; a transient outage shouldn't 5xx the page.
 		writeJSON(w, empty)
 		return
 	}
@@ -203,122 +180,51 @@ func (h *Handler) HandleCost(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// gatherCostRuns enumerates engine-created Aim metadata runs and
-// builds the cost handler's working dataset. Each metadata run is one
-// astrolabe submit; the cost handler groups by (experiment, version)
-// for display.
-//
-// All cost dimensions — repo, backend, gpu_type, rate, outcome —
-// come from the run's tags. The prior gpu_type → rate fallback that
-// read state files is gone: in astrolabe v1.8+ rate lives exclusively
-// on the engine-written metadata run, never on the submit row. A
-// metadata run that lacks a rate tag (Lambda outage at acquire time)
-// surfaces as ``cents=nil`` in the cost UI — the run still counts in
-// submit/hour totals.
+// gatherCostRuns enumerates submits in the state DB and builds the
+// cost handler's working dataset. One row per submit version; no
+// per-run fan-out, no Aim hops. ``gpu_rate_cents_per_hour`` may be
+// NULL — those rows surface as cents=nil in the UI but still count
+// toward submit/hour totals.
 func (h *Handler) gatherCostRuns() ([]costRun, error) {
-	experiments, err := h.aim.ListExperiments()
+	states, err := h.state.ListAll()
 	if err != nil {
 		return nil, err
 	}
-
-	type runJob struct {
-		expName string
-		ar      AimRun
-	}
-	var jobs []runJob
-	for _, exp := range experiments {
-		if exp.RunCount == 0 || exp.Archived {
+	out := make([]costRun, 0, len(states))
+	for _, s := range states {
+		started := parseISO(s.StartedAt)
+		if started.IsZero() {
+			// No usable start timestamp — can't place this submit in a
+			// window or compute hours. Skip rather than show a row
+			// floating outside any time bucket.
 			continue
 		}
-		expRuns, err := h.aim.ListExperimentRuns(exp.ID)
-		if err != nil {
-			continue
-		}
-		for _, ar := range expRuns.Runs {
-			if ar.Archived {
-				continue
-			}
-			jobs = append(jobs, runJob{expName: exp.Name, ar: ar})
-		}
-	}
+		ended := parseISO(s.FinishedAt)
+		active := s.FinishedAt == "" || ended.IsZero()
 
-	// Fan-out: one GetRunInfo per run for tag extraction.
-	out := make([]costRun, len(jobs))
-	var wg sync.WaitGroup
-	for i, j := range jobs {
-		wg.Add(1)
-		go func(i int, j runJob) {
-			defer wg.Done()
-			tags := AstrolabeTags{}
-			if info, err := h.aim.GetRunInfo(j.ar.RunID); err == nil {
-				tags = AstrolabeTagsFromParams(info.Params)
-			}
-			// Discriminator — see isCostMetadataRun. Only engine-created
-			// metadata runs count; composer runs, TB imports, and
-			// manual Aim runs all drop out here. out[i] stays
-			// zero-valued and gets pruned below.
-			if !isCostMetadataRun(tags) {
-				return
-			}
-			expName := tags.ExperimentName
-			if expName == "" {
-				expName = j.expName // Aim experiment fallback
-			}
-			version := tags.Version
-			if version == "" {
-				version = "v1" // legacy
-			}
-			rateCents := 0
-			hasRate := false
-			if tags.GPURateCentsPerHour != nil {
-				rateCents = *tags.GPURateCentsPerHour
-				hasRate = true
-			}
-			// Times: prefer engine-written ISO tags, fall back to Aim's
-			// own lifecycle. The tag-first preference matters for
-			// backfilled runs — Aim's creation_time reflects when the
-			// metadata Run() was constructed (potentially long after
-			// the actual submit), but the engine's started_at_iso tag
-			// reflects the real acquire moment.
-			started := parseISO(tags.StartedAtISO)
-			if started.IsZero() {
-				started = unixToTime(j.ar.CreationTime)
-			}
-			ended := parseISO(tags.FinishedAtISO)
-			if ended.IsZero() {
-				ended = unixToTime(j.ar.EndTime)
-			}
-			out[i] = costRun{
-				Experiment:  expName,
-				Version:     version,
-				SubmitID:    tags.SubmitID,
-				GPUType:     tags.GPUType,
-				RateCents:   rateCents,
-				HasRate:     hasRate,
-				Outcome:     tags.Outcome,
-				SubmittedBy: tags.SubmittedBy,
-				Repo:        tags.Repo,
-				Backend:     tags.Backend,
-				Started:     started,
-				Ended:       ended,
-				Active:      j.ar.EndTime == 0,
-			}
-		}(i, j)
-	}
-	wg.Wait()
-
-	// Drop runs with no started timestamp (can't price them or place
-	// them in a window) and runs that were filtered out by the
-	// UUID-submit_id check above (zero-valued costRun, empty
-	// Experiment field is the marker).
-	clean := make([]costRun, 0, len(out))
-	for _, r := range out {
-		if r.Started.IsZero() || r.Experiment == "" {
-			continue
+		rateCents := 0
+		hasRate := false
+		if s.GPURateCentsPerHour != nil {
+			rateCents = *s.GPURateCentsPerHour
+			hasRate = true
 		}
-		clean = append(clean, r)
+		out = append(out, costRun{
+			Experiment:  s.Name,
+			Version:     s.Version,
+			SubmitID:    s.SubmitID,
+			GPUType:     s.GPUType,
+			RateCents:   rateCents,
+			HasRate:     hasRate,
+			Outcome:     s.Outcome,
+			SubmittedBy: s.SubmittedBy,
+			Repo:        s.Repo,
+			Backend:     s.Backend,
+			Started:     started,
+			Ended:       ended,
+			Active:      active,
+		})
 	}
-	return clean, nil
+	return out, nil
 }
 
 // filterByWindow returns runs whose Started falls inside [start, end).
@@ -333,11 +239,10 @@ func filterByWindow(runs []costRun, start, end time.Time) []costRun {
 	return out
 }
 
-// runHours returns (hours, hoursPtr) for a single Aim run. For
-// terminal runs (Ended set), returns (delta, &delta). For in-flight,
-// returns (now-Started, nil) — the pointer being nil signals "render
-// — instead of a duration" to the frontend, mirroring the prior
-// state-file logic.
+// runHours returns (hours, hoursPtr) for a single submit. For terminal
+// runs (Ended set), returns (delta, &delta). For in-flight, returns
+// (now-Started, nil) — the pointer being nil signals "render — instead
+// of a duration" to the frontend.
 func runHours(r costRun, now time.Time) (float64, *float64) {
 	if r.Active || r.Ended.IsZero() {
 		return now.Sub(r.Started).Hours(), nil
@@ -367,21 +272,22 @@ func computeRunCents(r costRun, now time.Time) *int {
 // entry, then by experiment → experiment entry. Returns the
 // experiments list and the running total cents.
 //
-// Multi-run versions (e.g. two-model experiments where v1 ran BERT +
-// LatentBERT on the same Lambda instance) bill once per version:
-// instance hold time is approximated as max(Ended) - min(Started)
-// across the version's runs. Lambda charges per-instance, not per-
-// run, so summing run durations would overcount.
+// Multi-row versions (legacy two-model experiments where v1 had a
+// shared Lambda instance) bill once per version: instance hold time is
+// approximated as max(Ended) - min(Started). With the SQLite shape
+// there's exactly one row per (experiment, version) thanks to the
+// UNIQUE constraint, so the aggregation collapses to a passthrough —
+// but the structure is kept in case the schema relaxes the constraint.
 func buildExperiments(runs []costRun, now time.Time) ([]CostExperimentEntry, int) {
 	type versionAgg struct {
-		gpuType     string
-		rateCents   int
-		hasRate     bool
-		outcome     string
-		started     time.Time
-		ended       time.Time
-		anyActive   bool
-		runCount    int
+		gpuType   string
+		rateCents int
+		hasRate   bool
+		outcome   string
+		started   time.Time
+		ended     time.Time
+		anyActive bool
+		runCount  int
 	}
 	// experiment → version → agg
 	byExp := map[string]map[string]*versionAgg{}
@@ -486,8 +392,8 @@ func buildExperiments(runs []costRun, now time.Time) ([]CostExperimentEntry, int
 }
 
 // deriveStateFromVersion gives the frontend a state hint per version.
-// Real FSM state is only on the state file (and only for the latest
-// version). For non-latest versions we infer from Aim alone:
+// Real FSM state lives on the submit row; for legacy / partial data
+// we infer:
 //   - in-flight (any run active)        → "RUNNING"
 //   - terminal + outcome=success        → "COMPLETED"
 //   - terminal + outcome present, !success → "FAILED"
@@ -614,10 +520,9 @@ func runStackKey(r costRun, dim string) string {
 }
 
 // buildBreakdownFromRuns groups runs by the dimension, summing
-// hours/cents/submits + computing each row's percent of total. The
-// "submits" count is one-per-Aim-run; multi-run versions therefore
-// inflate the submits column. Cleaner would be one-per-(submit_id,
-// dim_value); deferring until the seam shows up in real usage.
+// hours/cents/submits + computing each row's percent of total. One
+// submit row counts as one submit (no inflation from multi-run
+// versions now that SQLite enforces one row per (experiment, version)).
 func buildBreakdownFromRuns(runs []costRun, dim string, total int) CostBreakdown {
 	type acc struct {
 		submits int
@@ -669,21 +574,9 @@ func defaultStr(v, fallback string) string {
 	return v
 }
 
-// unixToTime converts an Aim timestamp (Unix seconds, possibly
-// fractional). Zero → zero time.
-func unixToTime(secs float64) time.Time {
-	if secs <= 0 {
-		return time.Time{}
-	}
-	whole := int64(secs)
-	frac := int64((secs - float64(whole)) * 1e9)
-	return time.Unix(whole, frac).UTC()
-}
-
 // parseISO parses an ISO-8601 timestamp string written by the engine
 // (e.g. "2026-05-06T00:25:34.784457+00:00"). Returns zero on empty
-// or malformed input — the caller is expected to fall back to Aim's
-// own creation_time/end_time when this returns zero.
+// or malformed input.
 func parseISO(s string) time.Time {
 	if s == "" {
 		return time.Time{}

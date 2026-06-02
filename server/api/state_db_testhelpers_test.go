@@ -17,35 +17,37 @@ import (
 // raw INSERTs and we don't want to re-encode the FSM here.
 const testSchemaSQL = `
 CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
-INSERT INTO schema_migrations VALUES (1, '2026-05-30T00:00:00+00:00');
+INSERT INTO schema_migrations VALUES (2, '2026-06-02T00:00:00+00:00');
 
 CREATE TABLE submits (
-	id                    INTEGER PRIMARY KEY,
-	submit_id             TEXT NOT NULL UNIQUE,
-	experiment_name       TEXT NOT NULL,
-	version               TEXT NOT NULL,
-	submitted_by          TEXT NOT NULL,
-	repo                  TEXT,
-	ref                   TEXT,
-	backend               TEXT NOT NULL,
-	gpu_type              TEXT,
-	started_at            TEXT NOT NULL,
-	finished_at           TEXT,
-	outcome               TEXT,
-	current_state         TEXT NOT NULL,
-	instance_id           TEXT,
-	instance_ip           TEXT,
-	current_step          INTEGER NOT NULL DEFAULT 0,
-	total_steps           INTEGER NOT NULL DEFAULT 0,
-	current_step_label    TEXT,
-	healing_attempts      INTEGER NOT NULL DEFAULT 0,
-	slack_thread_ts       TEXT,
-	linear_doc_id         TEXT,
-	linear_doc_url        TEXT,
-	aim_metadata_run_hash TEXT,
-	pid                   INTEGER,
-	created_at            TEXT NOT NULL,
-	updated_at            TEXT NOT NULL,
+	id                      INTEGER PRIMARY KEY,
+	submit_id               TEXT NOT NULL UNIQUE,
+	experiment_name         TEXT NOT NULL,
+	version                 TEXT NOT NULL,
+	submitted_by            TEXT NOT NULL,
+	repo                    TEXT,
+	ref                     TEXT,
+	backend                 TEXT NOT NULL,
+	gpu_type                TEXT,
+	started_at              TEXT NOT NULL,
+	finished_at             TEXT,
+	outcome                 TEXT,
+	current_state           TEXT NOT NULL,
+	instance_id             TEXT,
+	instance_ip             TEXT,
+	current_step            INTEGER NOT NULL DEFAULT 0,
+	total_steps             INTEGER NOT NULL DEFAULT 0,
+	current_step_label      TEXT,
+	healing_attempts        INTEGER NOT NULL DEFAULT 0,
+	slack_thread_ts         TEXT,
+	linear_doc_id           TEXT,
+	linear_doc_url          TEXT,
+	aim_metadata_run_hash   TEXT,
+	pid                     INTEGER,
+	gpu_rate_cents_per_hour INTEGER,
+	estimated_cost_cents    INTEGER,
+	created_at              TEXT NOT NULL,
+	updated_at              TEXT NOT NULL,
 	UNIQUE (experiment_name, version)
 );
 
@@ -87,8 +89,9 @@ func insertSubmit(t *testing.T, db *sql.DB, fields map[string]any) {
 	if _, err := db.Exec(`INSERT INTO submits (
 		submit_id, experiment_name, version, submitted_by, backend, gpu_type,
 		started_at, finished_at, outcome, current_state, repo,
+		gpu_rate_cents_per_hour, estimated_cost_cents,
 		created_at, updated_at
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		submitID,
 		name,
 		version,
@@ -100,9 +103,22 @@ func insertSubmit(t *testing.T, db *sql.DB, fields map[string]any) {
 		nullableString(fields["outcome"]),
 		fallback(fields["current_state"], "COMPLETED"),
 		nullableString(fields["repo"]),
+		nullableInt(fields["gpu_rate_cents_per_hour"]),
+		nullableInt(fields["estimated_cost_cents"]),
 		now, now,
 	); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func nullableInt(v any) sql.NullInt64 {
+	switch n := v.(type) {
+	case int:
+		return sql.NullInt64{Int64: int64(n), Valid: true}
+	case int64:
+		return sql.NullInt64{Int64: n, Valid: true}
+	default:
+		return sql.NullInt64{Valid: false}
 	}
 }
 
