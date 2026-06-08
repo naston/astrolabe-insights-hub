@@ -1,0 +1,67 @@
+# Dashboard CI — Gate A (PR CI green) per astrolabe/plans/testing-and-deploy.md
+#
+# Catches the bulk of regressions before merge. Runs both halves of
+# the dashboard:
+#   - Go API: go test + go vet
+#   - Frontend: bun install + bun run build + bun run lint
+#
+# Motivated by the 2026-06-01 incident where test-fixture signature
+# drift landed silently across PRs #26 and #27 because nothing ran
+# `go test ./...` on the repo. Surfaced three days later.
+#
+# Pure unit tests. No external services. Build artifacts are
+# discarded — the release workflow handles real artifact publishing
+# on tag push.
+
+name: Tests
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go API
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: go vet
+        working-directory: server
+        run: go vet ./...
+
+      - name: go test
+        working-directory: server
+        run: go test -count=1 ./...
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Build
+        run: bun run build

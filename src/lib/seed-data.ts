@@ -393,7 +393,7 @@ const COST_SEED_SPECS: CostExperimentSpec[] = [
     gpu: "gpu_1x_a10",
     state: "COMPLETED",
     outcome: "success",
-    hours: 0.10,
+    hours: 0.1,
     estimatedHours: 0.5,
     submitter: "nathan",
     backend: "lambda",
@@ -519,14 +519,8 @@ export function seedCost(params?: {
         estimated_cents: centsForHours(s.gpu, s.estimatedHours),
       };
     });
-    const totalHours = versions.reduce<number>(
-      (sum, v) => sum + (v.hours ?? 0),
-      0,
-    );
-    const totalCents = versions.reduce<number>(
-      (sum, v) => sum + (v.cents ?? 0),
-      0,
-    );
+    const totalHours = versions.reduce<number>((sum, v) => sum + (v.hours ?? 0), 0);
+    const totalCents = versions.reduce<number>((sum, v) => sum + (v.cents ?? 0), 0);
     return {
       name: s.name,
       total_hours: totalHours,
@@ -612,8 +606,7 @@ export function seedCost(params?: {
     // delta-suppression check on the frontend fires regardless of which
     // path it uses (label-check or value-check). Other windows synthesize
     // ~15% less than current so the delta arrow shows a believable "↑ %".
-    prior_total_cents:
-      label === "all" ? 0 : Math.round(totalCents * 0.83),
+    prior_total_cents: label === "all" ? 0 : Math.round(totalCents * 0.83),
     time_series: timeSeries,
     breakdown: {
       dimension: groupBy,
@@ -622,7 +615,6 @@ export function seedCost(params?: {
     experiments,
   };
 }
-
 
 export function seedColors(): ColorsResponse {
   return {

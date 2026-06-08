@@ -167,11 +167,9 @@ export function ExperimentsList({ onShowHelp }: ExperimentsListProps) {
   // so the chart / breakdown work on the cost page can evolve without
   // bloating the home-page payload. Polled at the same cadence (cost
   // data is cheap to compute server-side, cached at 2s on the Go API).
-  const { data: costData } = usePolling(
-    (signal) => api.cost({ window: "30d" }, signal),
-    [],
-    { intervalMs: POLL_MS },
-  );
+  const { data: costData } = usePolling((signal) => api.cost({ window: "30d" }, signal), [], {
+    intervalMs: POLL_MS,
+  });
   // Distinguish "first paint, no data yet" from "background re-fetch".
   // We only show loading affordances during the first load.
   const firstLoad = loading && data === undefined;
@@ -567,12 +565,13 @@ interface KpiProps {
  * without needing a "→" or other gestural cruft.
  */
 function SpendKpiCard({ cents }: { cents: number | undefined }) {
-  const value = cents === undefined
-    ? "—"
-    : `$${(cents / 100).toLocaleString(undefined, {
-        minimumFractionDigits: 0,
-        maximumFractionDigits: 0,
-      })}`;
+  const value =
+    cents === undefined
+      ? "—"
+      : `$${(cents / 100).toLocaleString(undefined, {
+          minimumFractionDigits: 0,
+          maximumFractionDigits: 0,
+        })}`;
   return (
     <Link
       to="/cost"
@@ -594,9 +593,7 @@ function SpendKpiCard({ cents }: { cents: number | undefined }) {
           <ChevronRight className="h-3 w-3" strokeWidth={2} />
         </span>
       </div>
-      <div className="mt-1.5 text-2xl font-semibold text-tabular text-foreground">
-        {value}
-      </div>
+      <div className="mt-1.5 text-2xl font-semibold text-tabular text-foreground">{value}</div>
     </Link>
   );
 }

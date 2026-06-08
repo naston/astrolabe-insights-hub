@@ -118,9 +118,7 @@ export function RunsPanel({
       </div>
       <ul className="max-h-[320px] overflow-y-auto scrollbar-thin divide-y divide-border">
         {visibleRuns.length === 0 && (
-          <li className="px-3 py-4 text-center text-xs text-muted-foreground">
-            No runs match.
-          </li>
+          <li className="px-3 py-4 text-center text-xs text-muted-foreground">No runs match.</li>
         )}
         {visibleRuns.map((r) => {
           const hidden = hiddenRuns.has(r.hash);

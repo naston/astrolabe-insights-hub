@@ -10,11 +10,11 @@ A practitioner's cookbook for surfacing astrolabe's data outside the bundled das
 
 ## Pick a lane
 
-| Goal | Lane |
-|---|---|
-| "Display experiments / runs / version groups in my own UI" | **Lane 1**: read from this dashboard's Go API. |
+| Goal                                                                         | Lane                                                       |
+| ---------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| "Display experiments / runs / version groups in my own UI"                   | **Lane 1**: read from this dashboard's Go API.             |
 | "Display non-scalar Aim data (images, histograms) with astrolabe's grouping" | **Lane 2**: talk to Aim directly, use our tag conventions. |
-| "Log from training code without the `astrolabe-callbacks` library" | **Lane 3**: mimic the callback's env-var-to-tag wiring. |
+| "Log from training code without the `astrolabe-callbacks` library"           | **Lane 3**: mimic the callback's env-var-to-tag wiring.    |
 
 Lanes 1 and 2 compose — a custom UI can read both this dashboard's API for orchestration data and Aim's API for the rich metric types we don't surface.
 
@@ -26,18 +26,18 @@ The simplest path. The Go server runs on the NUC at `http://<nuc>:43801` and exp
 
 ### Endpoint reference
 
-| Method | Path | Returns |
-|---|---|---|
-| `GET` | `/api/experiments` | List of all experiments with state, GPU type, run count, version count, submitter |
-| `GET` | `/api/experiments/{name}/runs` | Detailed runs for one experiment (metrics list + final loss) |
-| `GET` | `/api/experiments/{name}/includes` | Resolved `--include` directives for an experiment |
-| `GET` | `/api/runs` | Flat list of all runs across all experiments, sorted by creation time desc |
-| `GET` | `/api/runs/{hash}/info` | Full Aim metadata for a run (params, traces, props) |
-| `GET` | `/api/runs/{hash}/metrics` | Available metric names for a run |
-| `GET` | `/api/runs/{hash}/metrics/{name}` | Time-series for one metric (steps, values, wall_times) |
-| `GET` | `/api/runs/{hash}/evals` | Eval-discovery manifest: eval Aim runs that score this training run (one per task_set, deduped by newest) |
-| `GET` | `/api/config/colors` | Color palette for chart rendering |
-| `GET` | `/api/health` | Connectivity check against upstream Aim API |
+| Method | Path                               | Returns                                                                                                   |
+| ------ | ---------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `GET`  | `/api/experiments`                 | List of all experiments with state, GPU type, run count, version count, submitter                         |
+| `GET`  | `/api/experiments/{name}/runs`     | Detailed runs for one experiment (metrics list + final loss)                                              |
+| `GET`  | `/api/experiments/{name}/includes` | Resolved `--include` directives for an experiment                                                         |
+| `GET`  | `/api/runs`                        | Flat list of all runs across all experiments, sorted by creation time desc                                |
+| `GET`  | `/api/runs/{hash}/info`            | Full Aim metadata for a run (params, traces, props)                                                       |
+| `GET`  | `/api/runs/{hash}/metrics`         | Available metric names for a run                                                                          |
+| `GET`  | `/api/runs/{hash}/metrics/{name}`  | Time-series for one metric (steps, values, wall_times)                                                    |
+| `GET`  | `/api/runs/{hash}/evals`           | Eval-discovery manifest: eval Aim runs that score this training run (one per task_set, deduped by newest) |
+| `GET`  | `/api/config/colors`               | Color palette for chart rendering                                                                         |
+| `GET`  | `/api/health`                      | Connectivity check against upstream Aim API                                                               |
 
 Path params (`{name}`, `{hash}`) accept anything — metric names commonly contain slashes (`train/loss`, `val/MaskedLanguagePerplexity`, `eval/cola/matthews`). URL-encode if your client doesn't.
 
@@ -153,13 +153,13 @@ If you want to display non-scalar data (attention maps logged via `aim.Image`, g
 
 Every astrolabe-orchestrated run lives in the Aim repo at `aim://localhost:43800` (gRPC) and `http://localhost:43802` (REST API). Each run carries our tag conventions:
 
-| Tag | Meaning |
-|---|---|
+| Tag                    | Meaning                                                    |
+| ---------------------- | ---------------------------------------------------------- |
 | `astrolabe.experiment` | The astrolabe experiment name (matches `/api/experiments`) |
-| `astrolabe.version` | Submit version (`v1`, `v2`, …) — increments per re-submit |
-| `astrolabe.submit_id` | UUID for this specific submit |
-| `astrolabe.user` | Submitter identity (matches `submitted_by`) |
-| `astrolabe.status` | `completed` / `failed` / `interrupted` (set on close) |
+| `astrolabe.version`    | Submit version (`v1`, `v2`, …) — increments per re-submit  |
+| `astrolabe.submit_id`  | UUID for this specific submit                              |
+| `astrolabe.user`       | Submitter identity (matches `submitted_by`)                |
+| `astrolabe.status`     | `completed` / `failed` / `interrupted` (set on close)      |
 
 Use these to group runs across experiments / versions / submitters in your custom UI without re-implementing astrolabe's orchestration concepts.
 
