@@ -255,10 +255,7 @@ function ExperimentBody({
   // re-includes a run that's already native to a non-selected version.
   // Comparison-hash set for the shared RunsPanel (O(1) lookup vs.
   // .some() inside a row render loop).
-  const comparisonHashesSet = useMemo(
-    () => new Set(comparison.map((c) => c.hash)),
-    [comparison],
-  );
+  const comparisonHashesSet = useMemo(() => new Set(comparison.map((c) => c.hash)), [comparison]);
 
   const includedRunsForTable = useMemo(() => {
     const nativeHashes = new Set(selectedVersion?.runs.map((r) => r.hash) ?? []);
@@ -540,124 +537,123 @@ function ExperimentBody({
           </TabsList>
 
           <TabsContent value="training" className="mt-3">
-        {/* Body — charts grid + sidebar */}
-        <div className="grid grid-cols-[minmax(0,1fr)_320px] gap-5">
-          {/* Charts column */}
-          <div className="space-y-4 min-w-0">
-            {visibleMetrics.length === 0 && (
-              <div className="rounded-lg border border-dashed border-border bg-card p-12 text-center text-sm text-muted-foreground">
-                All metrics hidden — toggle one back on from the sidebar.
+            {/* Body — charts grid + sidebar */}
+            <div className="grid grid-cols-[minmax(0,1fr)_320px] gap-5">
+              {/* Charts column */}
+              <div className="space-y-4 min-w-0">
+                {visibleMetrics.length === 0 && (
+                  <div className="rounded-lg border border-dashed border-border bg-card p-12 text-center text-sm text-muted-foreground">
+                    All metrics hidden — toggle one back on from the sidebar.
+                  </div>
+                )}
+                {visibleMetrics.map((metricName) => (
+                  <MetricChart
+                    key={metricName}
+                    metricName={metricName}
+                    runs={chartRuns}
+                    xMode={xMode}
+                  />
+                ))}
               </div>
-            )}
-            {visibleMetrics.map((metricName) => (
-              <MetricChart
-                key={metricName}
-                metricName={metricName}
-                runs={chartRuns}
-                xMode={xMode}
-              />
-            ))}
-          </div>
 
-          {/* Sidebar */}
-          <aside className="space-y-3">
-            {/* X-axis selector */}
-            <div className="rounded-lg border border-border bg-card p-3">
-              <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground mb-2">
-                X-axis
-              </div>
-              <div className="flex rounded-md border border-border bg-surface p-0.5 text-xs">
-                <SegButton active={xMode === "step"} onClick={() => setXMode("step")}>
-                  Step
-                </SegButton>
-                <SegButton active={xMode === "wall_time"} onClick={() => setXMode("wall_time")}>
-                  Wall time
-                </SegButton>
-              </div>
-              <p className="mt-2 text-[10px] text-muted-foreground leading-relaxed">
-                Drag any chart to zoom — all charts sync. Double-click to reset.
-              </p>
-            </div>
+              {/* Sidebar */}
+              <aside className="space-y-3">
+                {/* X-axis selector */}
+                <div className="rounded-lg border border-border bg-card p-3">
+                  <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground mb-2">
+                    X-axis
+                  </div>
+                  <div className="flex rounded-md border border-border bg-surface p-0.5 text-xs">
+                    <SegButton active={xMode === "step"} onClick={() => setXMode("step")}>
+                      Step
+                    </SegButton>
+                    <SegButton active={xMode === "wall_time"} onClick={() => setXMode("wall_time")}>
+                      Wall time
+                    </SegButton>
+                  </div>
+                  <p className="mt-2 text-[10px] text-muted-foreground leading-relaxed">
+                    Drag any chart to zoom — all charts sync. Double-click to reset.
+                  </p>
+                </div>
 
-            {/* Runs panel — shared with the Eval tab. State lives in
+                {/* Runs panel — shared with the Eval tab. State lives in
                 this component (ExperimentBody); the panel is rendered
                 in both tabs, so hiding a run on Training also hides it
                 on Eval. */}
-            <RunsPanel
-              visibleRuns={visibleRuns}
-              selectedVersionLabel={selectedVersion?.label}
-              runFilter={runFilter}
-              onRunFilterChange={setRunFilter}
-              hiddenRuns={hiddenRuns}
-              setHiddenRuns={setHiddenRuns}
-              runColors={runColors}
-              runMeta={runMeta}
-              comparisonHashes={comparisonHashesSet}
-              showSubmitterLines={showSubmitterLines}
-              onAddRuns={() => setModalOpen(true)}
-              onRemoveComparison={(hash) => {
-                setComparison((prev) => prev.filter((c) => c.hash !== hash));
-                setRemovedFromIncludes((prev) => new Set([...prev, hash]));
-              }}
-            />
+                <RunsPanel
+                  visibleRuns={visibleRuns}
+                  selectedVersionLabel={selectedVersion?.label}
+                  runFilter={runFilter}
+                  onRunFilterChange={setRunFilter}
+                  hiddenRuns={hiddenRuns}
+                  setHiddenRuns={setHiddenRuns}
+                  runColors={runColors}
+                  runMeta={runMeta}
+                  comparisonHashes={comparisonHashesSet}
+                  showSubmitterLines={showSubmitterLines}
+                  onAddRuns={() => setModalOpen(true)}
+                  onRemoveComparison={(hash) => {
+                    setComparison((prev) => prev.filter((c) => c.hash !== hash));
+                    setRemovedFromIncludes((prev) => new Set([...prev, hash]));
+                  }}
+                />
 
+                {/* Metric toggles */}
+                {metricNames.length > 1 && (
+                  <div className="rounded-lg border border-border bg-card overflow-hidden">
+                    <div className="px-3 py-2 border-b border-border text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                      Metrics
+                    </div>
+                    <ul className="max-h-[200px] overflow-y-auto scrollbar-thin">
+                      {metricNames.map((m) => {
+                        const hidden = hiddenMetrics.has(m);
+                        return (
+                          <li key={m}>
+                            <button
+                              onClick={() =>
+                                setHiddenMetrics((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(m)) next.delete(m);
+                                  else next.add(m);
+                                  return next;
+                                })
+                              }
+                              className={cn(
+                                "w-full text-left px-3 py-1.5 text-xs font-mono hover:bg-muted/50 flex items-center gap-2",
+                                hidden && "text-muted-foreground line-through",
+                              )}
+                            >
+                              <span
+                                className={cn(
+                                  "h-1.5 w-1.5 rounded-full",
+                                  hidden ? "bg-muted-foreground/40" : "bg-primary",
+                                )}
+                              />
+                              {m}
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                )}
 
-            {/* Metric toggles */}
-            {metricNames.length > 1 && (
-              <div className="rounded-lg border border-border bg-card overflow-hidden">
-                <div className="px-3 py-2 border-b border-border text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                  Metrics
-                </div>
-                <ul className="max-h-[200px] overflow-y-auto scrollbar-thin">
-                  {metricNames.map((m) => {
-                    const hidden = hiddenMetrics.has(m);
-                    return (
-                      <li key={m}>
-                        <button
-                          onClick={() =>
-                            setHiddenMetrics((prev) => {
-                              const next = new Set(prev);
-                              if (next.has(m)) next.delete(m);
-                              else next.add(m);
-                              return next;
-                            })
-                          }
-                          className={cn(
-                            "w-full text-left px-3 py-1.5 text-xs font-mono hover:bg-muted/50 flex items-center gap-2",
-                            hidden && "text-muted-foreground line-through",
-                          )}
-                        >
-                          <span
-                            className={cn(
-                              "h-1.5 w-1.5 rounded-full",
-                              hidden ? "bg-muted-foreground/40" : "bg-primary",
-                            )}
-                          />
-                          {m}
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </div>
-            )}
-
-            {/* Per-run stats — one row per run of the selected version, plus
+                {/* Per-run stats — one row per run of the selected version, plus
                 a separate "Included" group for runs pulled in from other
                 experiments (via --include or the comparison modal). The
                 metric + best/last selector applies to both groups so a
                 researcher can see how an included run compares against
                 this experiment's runs at a glance. */}
-            <RunStatsTable
-              versionLabel={selectedVersion?.label}
-              runs={selectedVersion?.runs ?? []}
-              includedRuns={includedRunsForTable}
-              runColors={runColors}
-              availableMetrics={metricNames}
-              showSubmitterLines={showSubmitterLines}
-            />
-          </aside>
-        </div>
+                <RunStatsTable
+                  versionLabel={selectedVersion?.label}
+                  runs={selectedVersion?.runs ?? []}
+                  includedRuns={includedRunsForTable}
+                  runColors={runColors}
+                  availableMetrics={metricNames}
+                  showSubmitterLines={showSubmitterLines}
+                />
+              </aside>
+            </div>
           </TabsContent>
 
           <TabsContent value="eval" className="mt-3">
@@ -876,10 +872,7 @@ function RunStatsTable({
     let bestVal: number | null = null;
     for (const [hash, val] of Object.entries(computed)) {
       if (val == null) continue;
-      if (
-        bestVal == null ||
-        (direction === "min" ? val < bestVal : val > bestVal)
-      ) {
+      if (bestVal == null || (direction === "min" ? val < bestVal : val > bestVal)) {
         bestVal = val;
         bestHash = hash;
       }
@@ -1026,65 +1019,63 @@ function RunStatsTable({
                 </td>
               </tr>
               {includedRuns.map((r) => {
-                  const value = computed[r.hash];
-                  const isWinner = winnerHash === r.hash;
-                  return (
-                    <tr
-                      key={r.hash}
-                      className={cn(
-                        "hover:bg-muted/50",
-                        isWinner && "bg-[color-mix(in_oklab,var(--success)_8%,transparent)]",
-                      )}
-                    >
-                      <td className="px-2 py-1.5 align-middle">
-                        <div className="flex flex-col gap-0.5 min-w-0">
-                          <div className="flex items-center gap-1.5">
-                            <span
-                              className="h-1.5 w-1.5 rounded-sm shrink-0"
-                              style={{ backgroundColor: runColors[r.hash] ?? "#888" }}
-                            />
-                            <span className="text-foreground truncate">{r.name}</span>
-                            {showSubmitterLines && r.submitted_by && (
-                              <span className="text-[10px] text-muted-foreground shrink-0">
-                                by {r.submitted_by}
-                              </span>
-                            )}
-                          </div>
-                          {r.experiment && r.experiment !== r.name && (
-                            <span
-                              className="text-[10px] text-muted-foreground/80 truncate pl-3"
-                              title={`From experiment: ${r.experiment}`}
-                            >
-                              ↳ {r.experiment}
+                const value = computed[r.hash];
+                const isWinner = winnerHash === r.hash;
+                return (
+                  <tr
+                    key={r.hash}
+                    className={cn(
+                      "hover:bg-muted/50",
+                      isWinner && "bg-[color-mix(in_oklab,var(--success)_8%,transparent)]",
+                    )}
+                  >
+                    <td className="px-2 py-1.5 align-middle">
+                      <div className="flex flex-col gap-0.5 min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className="h-1.5 w-1.5 rounded-sm shrink-0"
+                            style={{ backgroundColor: runColors[r.hash] ?? "#888" }}
+                          />
+                          <span className="text-foreground truncate">{r.name}</span>
+                          {showSubmitterLines && r.submitted_by && (
+                            <span className="text-[10px] text-muted-foreground shrink-0">
+                              by {r.submitted_by}
                             </span>
                           )}
                         </div>
-                      </td>
-                      <td className="px-2 py-1.5 align-middle text-muted-foreground">
-                        <CopyableHash hash={r.hash} />
-                      </td>
-                      <td
-                        className={cn(
-                          "px-2 py-1.5 align-middle text-right text-tabular",
-                          isWinner && "text-[var(--success)] font-medium",
+                        {r.experiment && r.experiment !== r.name && (
+                          <span
+                            className="text-[10px] text-muted-foreground/80 truncate pl-3"
+                            title={`From experiment: ${r.experiment}`}
+                          >
+                            ↳ {r.experiment}
+                          </span>
                         )}
-                      >
-                        {value != null ? value.toFixed(4) : "—"}
-                      </td>
-                      {/* Duration + state aren't meaningful for an included run
+                      </div>
+                    </td>
+                    <td className="px-2 py-1.5 align-middle text-muted-foreground">
+                      <CopyableHash hash={r.hash} />
+                    </td>
+                    <td
+                      className={cn(
+                        "px-2 py-1.5 align-middle text-right text-tabular",
+                        isWinner && "text-[var(--success)] font-medium",
+                      )}
+                    >
+                      {value != null ? value.toFixed(4) : "—"}
+                    </td>
+                    {/* Duration + state aren't meaningful for an included run
                           inside this experiment's frame — the run finished
                           some other time, in some other state. Render dashes
                           so the column structure stays consistent across the
                           two groups. */}
-                      <td className="px-2 py-1.5 align-middle text-right text-tabular text-muted-foreground">
-                        —
-                      </td>
-                      <td className="px-2 py-1.5 align-middle text-right text-muted-foreground">
-                        —
-                      </td>
-                    </tr>
-                  );
-                })}
+                    <td className="px-2 py-1.5 align-middle text-right text-tabular text-muted-foreground">
+                      —
+                    </td>
+                    <td className="px-2 py-1.5 align-middle text-right text-muted-foreground">—</td>
+                  </tr>
+                );
+              })}
             </tbody>
           )}
         </table>

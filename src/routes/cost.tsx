@@ -36,10 +36,7 @@ const GROUP_BY_VALUES: ReadonlyArray<CostGroupByDimension> = [
   "backend",
 ];
 
-const STACK_VALUES: ReadonlyArray<CostGroupByDimension | "none"> = [
-  "none",
-  ...GROUP_BY_VALUES,
-];
+const STACK_VALUES: ReadonlyArray<CostGroupByDimension | "none"> = ["none", ...GROUP_BY_VALUES];
 
 export const Route = createFileRoute("/cost")({
   component: Cost,

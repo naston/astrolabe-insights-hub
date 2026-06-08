@@ -18,15 +18,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { ArrowLeft, ArrowUp, ArrowDown, Minus } from "lucide-react";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import {
   Select,
@@ -109,7 +101,12 @@ interface CostSearchParams {
 // Comma-joined multi-select serialization, same convention as the home
 // page filter shelf. Empty/missing = no filter.
 function decodeList(s?: string): string[] {
-  return s ? s.split(",").map((x) => x.trim()).filter(Boolean) : [];
+  return s
+    ? s
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean)
+    : [];
 }
 function encodeList(xs: string[]): string | undefined {
   return xs.length === 0 ? undefined : xs.join(",");
@@ -263,10 +260,8 @@ function CostHeader({
           {failedCents > 0 && (
             <p className="mt-1 text-sm text-muted-foreground">
               of which{" "}
-              <span className="font-medium text-foreground">
-                {formatCents(failedCents)}
-              </span>{" "}
-              ({failedPct.toFixed(0)}%) on failed runs
+              <span className="font-medium text-foreground">{formatCents(failedCents)}</span> (
+              {failedPct.toFixed(0)}%) on failed runs
             </p>
           )}
         </div>
@@ -281,21 +276,13 @@ function DeltaPill({ pct, priorWindow }: { pct: number; priorWindow: string }) {
   return (
     <span className="inline-flex items-center gap-1 text-sm text-muted-foreground">
       <Icon className="h-3.5 w-3.5" />
-      <span className="font-medium tabular-nums text-foreground">
-        {Math.abs(pct).toFixed(0)}%
-      </span>
+      <span className="font-medium tabular-nums text-foreground">{Math.abs(pct).toFixed(0)}%</span>
       <span>vs prior {priorWindow}</span>
     </span>
   );
 }
 
-function WindowSelector({
-  value,
-  onChange,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-}) {
+function WindowSelector({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   return (
     <div className="inline-flex rounded-md border border-border overflow-hidden shrink-0">
       {WINDOW_PRESETS.map((p) => (
@@ -519,10 +506,7 @@ function CostBreakdown({
     <div className="rounded-md border border-border bg-surface">
       <div className="border-b border-border px-4 py-3 flex items-center gap-3">
         <span className="text-sm font-medium">Group by</span>
-        <Select
-          value={groupBy}
-          onValueChange={(v) => setGroupBy(v as CostGroupByDimension)}
-        >
+        <Select value={groupBy} onValueChange={(v) => setGroupBy(v as CostGroupByDimension)}>
           <SelectTrigger className="h-8 w-[160px] text-sm">
             <SelectValue />
           </SelectTrigger>
@@ -589,10 +573,7 @@ function CostExperiments({
   filterRepos: string[];
   filterGpus: string[];
   filterOutcomes: string[];
-  setFilter: (
-    key: "f_submitter" | "f_repo" | "f_gpu" | "f_outcome",
-    xs: string[],
-  ) => void;
+  setFilter: (key: "f_submitter" | "f_repo" | "f_gpu" | "f_outcome", xs: string[]) => void;
 }) {
   // Filter option lists are computed from the unfiltered window so the
   // dropdowns always show every value that COULD be filtered to, not just
@@ -664,11 +645,7 @@ function CostExperiments({
   }, [filteredExperiments]);
 
   const anyFilter =
-    filterSubmitters.length +
-      filterRepos.length +
-      filterGpus.length +
-      filterOutcomes.length >
-    0;
+    filterSubmitters.length + filterRepos.length + filterGpus.length + filterOutcomes.length > 0;
 
   return (
     <div className="rounded-md border border-border bg-surface">
@@ -765,10 +742,7 @@ function ExperimentRows({
         return (
           <tr
             key={v.version}
-            className={cn(
-              "border-border",
-              isLastVersion && !isLast && "border-b",
-            )}
+            className={cn("border-border", isLastVersion && !isLast && "border-b")}
           >
             {isFirstVersion && (
               <td
@@ -799,8 +773,7 @@ function ExperimentRows({
 
 function VersionCells({ version }: { version: CostVersionEntry }) {
   const inFlight = version.cents === null;
-  const isFail =
-    version.outcome !== null && TERMINAL_FAIL_OUTCOMES.has(version.outcome);
+  const isFail = version.outcome !== null && TERMINAL_FAIL_OUTCOMES.has(version.outcome);
   return (
     <>
       <td className="px-4 py-2 tabular-nums text-muted-foreground">{version.version}</td>

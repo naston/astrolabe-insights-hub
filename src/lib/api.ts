@@ -9,7 +9,14 @@ import type {
   Run,
   RunInfo,
 } from "./types";
-import { seedColors, seedCost, seedExperiments, seedIncludes, seedMetric, seedRuns } from "./seed-data";
+import {
+  seedColors,
+  seedCost,
+  seedExperiments,
+  seedIncludes,
+  seedMetric,
+  seedRuns,
+} from "./seed-data";
 
 const BASE = "/api";
 
@@ -97,11 +104,7 @@ export const api = {
    *  "no eval data yet" empty state. */
   evals: (modelRunHash: string, signal?: AbortSignal) =>
     withSeed(
-      () =>
-        getJSON<EvalManifestEntry[]>(
-          `/runs/${encodeURIComponent(modelRunHash)}/evals`,
-          signal,
-        ),
+      () => getJSON<EvalManifestEntry[]>(`/runs/${encodeURIComponent(modelRunHash)}/evals`, signal),
       () => [],
       signal,
     ),
@@ -110,11 +113,7 @@ export const api = {
    *  fetching each series. Seed returns an empty traces list. */
   runInfo: (hash: string, signal?: AbortSignal) =>
     withSeed(
-      () =>
-        getJSON<RunInfo>(
-          `/runs/${encodeURIComponent(hash)}/info`,
-          signal,
-        ),
+      () => getJSON<RunInfo>(`/runs/${encodeURIComponent(hash)}/info`, signal),
       () => ({ params: {}, traces: { metric: [] } }),
       signal,
     ),
@@ -130,10 +129,7 @@ export const api = {
    * Seed fallback returns a deterministic 30d/submitter snapshot anchored
    * to 2026-05-28 so layout work doesn't depend on a reachable Go API.
    */
-  cost: (
-    params: { window?: string; group_by?: string; stack?: string },
-    signal?: AbortSignal,
-  ) =>
+  cost: (params: { window?: string; group_by?: string; stack?: string }, signal?: AbortSignal) =>
     withSeed(
       () => {
         const qs = new URLSearchParams();
@@ -153,19 +149,8 @@ export const api = {
       () =>
         seedCost({
           window: params.window,
-          group_by: params.group_by as
-            | "submitter"
-            | "repo"
-            | "gpu_type"
-            | "outcome"
-            | undefined,
-          stack: params.stack as
-            | "submitter"
-            | "repo"
-            | "gpu_type"
-            | "outcome"
-            | "none"
-            | undefined,
+          group_by: params.group_by as "submitter" | "repo" | "gpu_type" | "outcome" | undefined,
+          stack: params.stack as "submitter" | "repo" | "gpu_type" | "outcome" | "none" | undefined,
         }),
       signal,
     ),

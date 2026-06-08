@@ -49,13 +49,13 @@ export interface EvalArtifact {
   /** For shape='table': one entry per task. */
   table?: Array<{
     task: string;
-    metric: string;      // 'matthews', 'accuracy', ...
+    metric: string; // 'matthews', 'accuracy', ...
     lastValue: number;
   }>;
   /** For shape='trace': one entry per metric, each with a step-series. */
   trace?: Array<{
-    task: string;        // 'cola'
-    metric: string;      // 'matthews'
+    task: string; // 'cola'
+    metric: string; // 'matthews'
     series: Array<{ step: number; value: number }>;
   }>;
 }
@@ -117,9 +117,7 @@ function useRealEvals(runs: EvalTabProps["runs"]): FetchState {
     const ctrl = new AbortController();
     let cancelled = false;
 
-    async function buildArtifactsForRun(
-      modelRunHash: string,
-    ): Promise<EvalArtifact[]> {
+    async function buildArtifactsForRun(modelRunHash: string): Promise<EvalArtifact[]> {
       const manifest = await api.evals(modelRunHash, ctrl.signal);
       // For each eval Aim run, fetch info (to enumerate metric names)
       // then fetch each metric's series. The series tell us shape +
@@ -150,9 +148,7 @@ function useRealEvals(runs: EvalTabProps["runs"]): FetchState {
             (series.steps ?? []).some((s) => s > 0),
           );
 
-          const completedAtIso = new Date(
-            (entry.creation_time ?? 0) * 1000,
-          ).toISOString();
+          const completedAtIso = new Date((entry.creation_time ?? 0) * 1000).toISOString();
 
           if (!anyMultiStep) {
             const table = seriesByMetric
@@ -210,9 +206,7 @@ function useRealEvals(runs: EvalTabProps["runs"]): FetchState {
     async function fetchAll() {
       setState((s) => ({ ...s, loading: true }));
       try {
-        const perRun = await Promise.all(
-          runs.map((r) => buildArtifactsForRun(r.hash)),
-        );
+        const perRun = await Promise.all(runs.map((r) => buildArtifactsForRun(r.hash)));
         if (cancelled) return;
         const flattened = perRun.flat();
         setState({ artifacts: flattened, loading: false, error: null });
@@ -236,12 +230,7 @@ function useRealEvals(runs: EvalTabProps["runs"]): FetchState {
 
 // ---------------------------------------------------------------- main
 
-export function EvalTab({
-  runs,
-  currentRunHash,
-  runColors,
-  hiddenRunHashes,
-}: EvalTabProps) {
+export function EvalTab({ runs, currentRunHash, runColors, hiddenRunHashes }: EvalTabProps) {
   // Filter out runs the user has hidden via the shared RunsPanel before
   // anything else — table rows and trace lines both respect the toggle.
   const visibleRuns = useMemo(
@@ -278,8 +267,7 @@ export function EvalTab({
   if (visibleRuns.length === 0 && runs.length > 0) {
     return (
       <div className="rounded-lg border border-dashed border-border bg-card p-12 text-center text-sm text-muted-foreground">
-        All runs are hidden. Toggle one back on from the Runs panel to
-        see its eval results.
+        All runs are hidden. Toggle one back on from the Runs panel to see its eval results.
       </div>
     );
   }
@@ -292,12 +280,8 @@ export function EvalTab({
   if (error) {
     return (
       <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-6 text-center text-sm">
-        <div className="font-medium text-destructive">
-          Failed to load eval data
-        </div>
-        <div className="mt-1 text-xs font-mono text-muted-foreground">
-          {error}
-        </div>
+        <div className="font-medium text-destructive">Failed to load eval data</div>
+        <div className="mt-1 text-xs font-mono text-muted-foreground">{error}</div>
       </div>
     );
   }
@@ -316,8 +300,7 @@ export function EvalTab({
   if (groups.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-border bg-card p-12 text-center text-sm text-muted-foreground">
-        No eval data for these runs yet. Eval data appears here once a
-        researcher calls{" "}
+        No eval data for these runs yet. Eval data appears here once a researcher calls{" "}
         <code className="rounded bg-background/60 px-1 py-0.5 font-mono">
           astrolabe.eval_results.log_eval_table(...)
         </code>{" "}
