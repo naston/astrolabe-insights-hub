@@ -158,13 +158,41 @@ function ExperimentBody({
     return () => ctrl.abort();
   }, []);
 
-  // Comparison runs (from other experiments) — held in local state.
-  // Seeded from the experiment's --include list (the astrolabe submit
-  // flag), then user-extendable via the "Add comparison runs" modal.
-  // Without this fetch the --include flag is silently ignored on the
-  // dashboard side: the Go API exposes /api/experiments/{name}/includes
-  // but nothing reads it.
-  const [comparison, setComparison] = useState<ComparisonRunPick[]>([]);
+  // Comparison runs are the union of two independent sources:
+  //
+  //   seededComparison — auto-populated from THIS version's --include
+  //     list. Replaced entirely on each fetch (including when the user
+  //     switches versions). Wiping-and-replacing is what makes version
+  //     navigation work: a version without includes must not carry
+  //     over the prior version's include set.
+  //
+  //   userAddedComparison — added by the user via the "Add comparison
+  //     runs" modal. Persists across version switches because the user
+  //     explicitly opted these in.
+  //
+  // Prior implementation lumped both into one `comparison` state and
+  // used a merge (keep-anything-not-in-new-seeds) that couldn't tell
+  // them apart. That caused v3's seeded includes to survive when the
+  // user navigated to v1 or v5, because they looked identical to
+  // manual additions.
+  const [seededComparison, setSeededComparison] = useState<ComparisonRunPick[]>([]);
+  const [userAddedComparison, setUserAddedComparison] = useState<ComparisonRunPick[]>([]);
+
+  // Derived union with dedup — the rest of the component sees this as
+  // "the current comparison list" and doesn't need to know the split.
+  // De-dupes by hash: if a user manually added a run that also happens
+  // to be in this version's includes, it shows once, not twice.
+  const comparison = useMemo(() => {
+    const seen = new Set<string>();
+    const out: ComparisonRunPick[] = [];
+    for (const c of [...seededComparison, ...userAddedComparison]) {
+      if (seen.has(c.hash)) continue;
+      seen.add(c.hash);
+      out.push(c);
+    }
+    return out;
+  }, [seededComparison, userAddedComparison]);
+
   const [modalOpen, setModalOpen] = useState(false);
 
   // Track which run hashes the user has explicitly removed via the X
@@ -213,13 +241,10 @@ function ExperimentBody({
             }
           }
         }
-        // Merge: keep user-added comparisons that aren't in the include
-        // (so the modal-driven additions persist alongside the auto-seed).
-        setComparison((prev) => {
-          const seen = new Set(seedHashes.map((s) => s.hash));
-          const userOnly = prev.filter((p) => !seen.has(p.hash));
-          return [...seedHashes, ...userOnly];
-        });
+        // Replace the seeded set entirely. User-added comparisons live
+        // in a separate state and are unaffected — see the comment on
+        // seededComparison/userAddedComparison for why the split exists.
+        setSeededComparison(seedHashes);
         setUnresolvedIncludes(unresolved);
       } catch {
         /* keep prior state on error — quiet polling */
@@ -598,7 +623,12 @@ function ExperimentBody({
                   showSubmitterLines={showSubmitterLines}
                   onAddRuns={() => setModalOpen(true)}
                   onRemoveComparison={(hash) => {
-                    setComparison((prev) => prev.filter((c) => c.hash !== hash));
+                    // Filter both states — the removed run could be in
+                    // either bucket. removedFromIncludes suppresses it
+                    // on next include-fetch so the seeded set doesn't
+                    // silently re-add it.
+                    setSeededComparison((prev) => prev.filter((c) => c.hash !== hash));
+                    setUserAddedComparison((prev) => prev.filter((c) => c.hash !== hash));
                     setRemovedFromIncludes((prev) => new Set([...prev, hash]));
                   }}
                 />
@@ -688,7 +718,12 @@ function ExperimentBody({
                   showSubmitterLines={showSubmitterLines}
                   onAddRuns={() => setModalOpen(true)}
                   onRemoveComparison={(hash) => {
-                    setComparison((prev) => prev.filter((c) => c.hash !== hash));
+                    // Filter both states — the removed run could be in
+                    // either bucket. removedFromIncludes suppresses it
+                    // on next include-fetch so the seeded set doesn't
+                    // silently re-add it.
+                    setSeededComparison((prev) => prev.filter((c) => c.hash !== hash));
+                    setUserAddedComparison((prev) => prev.filter((c) => c.hash !== hash));
                     setRemovedFromIncludes((prev) => new Set([...prev, hash]));
                   }}
                 />
@@ -704,7 +739,12 @@ function ExperimentBody({
         currentExperiment={experimentName}
         alreadyAdded={new Set(comparison.map((c) => c.hash))}
         onAdd={(run) => {
-          setComparison((prev) => (prev.find((c) => c.hash === run.hash) ? prev : [...prev, run]));
+          // Manual additions go into the user-added bucket so they
+          // persist across version switches (unlike seeded includes,
+          // which are scoped to the version that submitted them).
+          setUserAddedComparison((prev) =>
+            prev.find((c) => c.hash === run.hash) ? prev : [...prev, run],
+          );
           // If this run was previously removed (X), un-suppress it so
           // re-adding via the modal sticks across the next include refetch.
           setRemovedFromIncludes((prev) => {
