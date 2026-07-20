@@ -165,18 +165,38 @@ func (r *StateReader) GetState(experimentName string) (*ExperimentState, error) 
 	return s, nil
 }
 
-// GetIncludes returns the include specs for the most recent submit of
-// the given experiment name. Returns nil (not error) when the
-// experiment is unknown — caller renders an empty includes list.
-func (r *StateReader) GetIncludes(experimentName string) ([]string, error) {
+// GetIncludes returns the include specs for a specific version of the
+// given experiment. When version is "" (or "latest"), returns the
+// include specs for the most recent submit — preserves the pre-fix
+// behavior for callers that only care about the current version.
+//
+// The pre-fix version of this function ignored the requested version
+// entirely and always returned the latest submit's includes. That was
+// a bug: viewing an older version of an experiment on the dashboard
+// showed the newest submit's include set rather than the includes
+// that were active at that version. See the linked fix commit.
+//
+// Returns nil (not error) when the experiment or version is unknown —
+// caller renders an empty includes list.
+func (r *StateReader) GetIncludes(experimentName, version string) ([]string, error) {
 	if r == nil || r.db == nil {
 		return nil, nil
 	}
-	var submitID string
-	err := r.db.QueryRow(`SELECT submit_id FROM submits
-		WHERE experiment_name = ?
-		ORDER BY started_at DESC, id DESC LIMIT 1`,
-		experimentName).Scan(&submitID)
+	var (
+		submitID string
+		err      error
+	)
+	if version == "" || version == "latest" {
+		err = r.db.QueryRow(`SELECT submit_id FROM submits
+			WHERE experiment_name = ?
+			ORDER BY started_at DESC, id DESC LIMIT 1`,
+			experimentName).Scan(&submitID)
+	} else {
+		err = r.db.QueryRow(`SELECT submit_id FROM submits
+			WHERE experiment_name = ? AND version = ?
+			ORDER BY started_at DESC, id DESC LIMIT 1`,
+			experimentName, version).Scan(&submitID)
+	}
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

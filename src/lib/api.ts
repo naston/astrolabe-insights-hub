@@ -78,13 +78,16 @@ export const api = {
       () => seedRuns(experiment),
       signal,
     ),
-  includes: (experiment: string, signal?: AbortSignal) =>
+  includes: (experiment: string, version?: string, signal?: AbortSignal) =>
     withSeed(
-      () =>
-        getJSON<IncludesResponse>(
-          `/experiments/${encodeURIComponent(experiment)}/includes`,
+      () => {
+        const versionParam =
+          version && version !== "latest" ? `?version=${encodeURIComponent(version)}` : "";
+        return getJSON<IncludesResponse>(
+          `/experiments/${encodeURIComponent(experiment)}/includes${versionParam}`,
           signal,
-        ),
+        );
+      },
       () => seedIncludes(experiment),
       signal,
     ),

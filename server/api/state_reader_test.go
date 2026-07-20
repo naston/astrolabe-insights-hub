@@ -9,7 +9,11 @@ package api
 //     matching the legacy JSON layout.
 //   - GetState picks the most recent submit per experiment name
 //     (versioning: v1, v2 same name → returns v2).
-//   - GetIncludes returns the most recent submit's include specs.
+//   - GetIncludes(name, "") and GetIncludes(name, "latest") both
+//     return the most recent submit's include specs (backward compat).
+//   - GetIncludes(name, "vN") returns includes for that specific
+//     version — fixes the version-history bug where viewing an older
+//     version on the dashboard showed the latest submit's includes.
 //   - NULL columns surface as empty strings, not "<nil>" or panics.
 
 import (
@@ -205,12 +209,106 @@ func TestStateReader_GetIncludesLatestSubmit(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Close()
-	specs, err := r.GetIncludes("exp-c")
+	// Empty version string: return latest submit's includes (backward compat).
+	specs, err := r.GetIncludes("exp-c", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(specs) != 2 {
-		t.Fatalf("want 2 specs from v2, got %d (%v)", len(specs), specs)
+		t.Fatalf("want 2 specs from v2 latest, got %d (%v)", len(specs), specs)
+	}
+	// "latest" sentinel is treated identically to empty string.
+	specsLatest, err := r.GetIncludes("exp-c", "latest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specsLatest) != 2 {
+		t.Fatalf("want 2 specs from 'latest' sentinel, got %d (%v)", len(specsLatest), specsLatest)
+	}
+}
+
+// Regression test for the version-history bug where GetIncludes always
+// returned the latest submit's includes regardless of the version being
+// requested. Viewing v1 on the dashboard used to show v2's includes;
+// that behavior is fixed by the version parameter accepted here.
+func TestStateReader_GetIncludesSpecificVersion(t *testing.T) {
+	path := makeStateDBWith(t, func(db *sql.DB) {
+		insertSubmit(t, db, map[string]any{
+			"experiment_name": "exp-d",
+			"version":         "v1",
+			"submitted_by":    "alice",
+			"backend":         "lambda",
+			"started_at":      "2026-05-30T09:00:00+00:00",
+		})
+		insertSubmit(t, db, map[string]any{
+			"experiment_name": "exp-d",
+			"version":         "v2",
+			"submitted_by":    "alice",
+			"backend":         "lambda",
+			"started_at":      "2026-05-30T11:00:00+00:00",
+		})
+		insertSubmit(t, db, map[string]any{
+			"experiment_name": "exp-d",
+			"version":         "v3",
+			"submitted_by":    "alice",
+			"backend":         "lambda",
+			"started_at":      "2026-05-30T13:00:00+00:00",
+		})
+		// v1 has one include, v2 has two, v3 has none.
+		if _, err := db.Exec(
+			`INSERT INTO includes (submit_id, spec) VALUES (?, ?), (?, ?), (?, ?)`,
+			"test-exp-d-v1", "v1-include-A",
+			"test-exp-d-v2", "v2-include-A",
+			"test-exp-d-v2", "v2-include-B",
+		); err != nil {
+			t.Fatal(err)
+		}
+	})
+	r, err := NewStateReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	// v1 → exactly one include, and it must be the v1-owned one.
+	specs, err := r.GetIncludes("exp-d", "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specs) != 1 || specs[0] != "v1-include-A" {
+		t.Fatalf("want [v1-include-A] for v1, got %v", specs)
+	}
+
+	// v2 → two v2-owned includes only. Must not leak v1's or v3's.
+	specs, err = r.GetIncludes("exp-d", "v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specs) != 2 {
+		t.Fatalf("want 2 specs for v2, got %d (%v)", len(specs), specs)
+	}
+	for _, s := range specs {
+		if s == "v1-include-A" {
+			t.Fatalf("v2 leaked v1's include: %v", specs)
+		}
+	}
+
+	// v3 → no includes, must return empty (not nil-vs-empty ambiguity error).
+	specs, err = r.GetIncludes("exp-d", "v3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specs) != 0 {
+		t.Fatalf("want 0 specs for v3, got %d (%v)", len(specs), specs)
+	}
+
+	// Unknown version on a known experiment → nil, no error.
+	specs, err = r.GetIncludes("exp-d", "v99")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specs) != 0 {
+		t.Fatalf("want 0 specs for unknown version, got %d (%v)", len(specs), specs)
 	}
 }
 
@@ -221,7 +319,7 @@ func TestStateReader_GetIncludesUnknownExperimentReturnsNil(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Close()
-	specs, err := r.GetIncludes("nope")
+	specs, err := r.GetIncludes("nope", "")
 	if err != nil {
 		t.Fatalf("want nil error for unknown experiment, got %v", err)
 	}

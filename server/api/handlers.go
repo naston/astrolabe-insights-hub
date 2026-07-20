@@ -450,7 +450,14 @@ func (h *Handler) HandleExperimentRuns(w http.ResponseWriter, r *http.Request) {
 //                  Runs slice so the frontend can render a struck-out
 //                  chip rather than silently dropping the include.
 //
-// GET /api/experiments/{name}/includes
+// GET /api/experiments/{name}/includes[?version=vN]
+//
+// The ?version query parameter scopes the returned includes to that
+// specific version's submit. Without it (or with version=latest), the
+// endpoint returns the most recent submit's includes. This preserves
+// backward compatibility for callers that don't pass version, while
+// letting the dashboard render version-accurate include lists when
+// the user navigates between versions.
 func (h *Handler) HandleExperimentIncludes(w http.ResponseWriter, r *http.Request) {
 	name := extractPathParam(r.URL.Path, "/api/experiments/", "/includes")
 	if name == "" {
@@ -463,7 +470,8 @@ func (h *Handler) HandleExperimentIncludes(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	includeNames, err := h.state.GetIncludes(name)
+	version := r.URL.Query().Get("version")
+	includeNames, err := h.state.GetIncludes(name, version)
 	if err != nil || len(includeNames) == 0 {
 		writeJSON(w, map[string]interface{}{"includes": []IncludeEntry{}})
 		return
