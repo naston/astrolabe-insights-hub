@@ -189,7 +189,12 @@ function ExperimentBody({
     const ctrl = new AbortController();
     async function load() {
       try {
-        const data = await api.includes(experimentName, ctrl.signal);
+        // Pass the currently-selected versionParam so includes are
+        // scoped to the version being viewed. Without this, the API
+        // returns the latest submit's includes regardless of which
+        // version the URL points at, which broke version-history
+        // navigation on the dashboard.
+        const data = await api.includes(experimentName, versionParam, ctrl.signal);
         if (cancelled) return;
         const seedHashes: ComparisonRunPick[] = [];
         const unresolved: string[] = [];
@@ -227,7 +232,7 @@ function ExperimentBody({
       ctrl.abort();
       window.clearInterval(id);
     };
-  }, [experimentName, removedFromIncludes]);
+  }, [experimentName, versionParam, removedFromIncludes]);
 
   // The detail page overlays the runs of one *version* (the selected version
   // — typically "latest"). The version selector picks which submit's runs
