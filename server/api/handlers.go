@@ -731,6 +731,13 @@ func (h *Handler) HandleRunEvals(w http.ResponseWriter, r *http.Request) {
 	// then fan out the GetRunInfo calls in parallel — same pattern as
 	// aimRunIndex. One GetRunInfo per candidate is unavoidable since
 	// the tags live in params.
+	//
+	// No pre-filter on experiment name: eval discovery is tag-based per
+	// plans/eval-runs.md. In local-aim mode the sidecar's experiment
+	// association stamps synced eval runs with the *training*
+	// experiment name (not eval/<task_set>), so an experiment-name
+	// pre-filter would silently drop them. The tag check below is the
+	// source of truth.
 	type candidate struct {
 		hash         string
 		creationTime float64
@@ -738,13 +745,6 @@ func (h *Handler) HandleRunEvals(w http.ResponseWriter, r *http.Request) {
 	var candidates []candidate
 	for _, exp := range experiments {
 		if exp.RunCount == 0 || exp.Archived {
-			continue
-		}
-		// Filing convention: eval runs live under ``eval/<task_set>``.
-		// Use this as a cheap pre-filter so we don't GetRunInfo on
-		// every training run in the repo. Falls back to a full scan
-		// if Aim's experiment naming hasn't been migrated.
-		if !strings.HasPrefix(exp.Name, "eval/") {
 			continue
 		}
 		expRuns, err := h.aim.ListExperimentRuns(exp.ID)
