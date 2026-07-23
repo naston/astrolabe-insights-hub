@@ -170,17 +170,18 @@ func TestHandleRunEvalsSkipsEmptyTaskSet(t *testing.T) {
 	}
 }
 
-func TestHandleRunEvalsSkipsRunsOutsideEvalExperimentPrefix(t *testing.T) {
-	// Pre-filter: only experiments named ``eval/...`` are scanned.
-	// An eval-tagged run filed under a wrong experiment (e.g., the
-	// model's training experiment) won't be discovered. This is the
-	// price of the cheap pre-filter — producers who use the helpers
-	// always file correctly.
+func TestHandleRunEvalsFindsEvalRunsRegardlessOfExperimentFiling(t *testing.T) {
+	// Discovery is TAG-BASED, not experiment-name-based (see
+	// plans/eval-runs.md). Real-world case: in local-aim mode the
+	// sidecar's experiment association stamps synced eval runs with
+	// the *training* experiment name (e.g. ``06b-rtd-calibration``),
+	// not ``eval/<task_set>``. An experiment-name pre-filter would
+	// silently drop these; the tag check is the source of truth.
 	t0 := time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)
 	runs := []fakeRun{
 		{
-			experiment:   "my-training-experiment",
-			hash:         "misfiled",
+			experiment:   "06b-rtd-calibration",
+			hash:         "sidecar-attributed",
 			creationTime: unixSecs(t0),
 			tags: map[string]any{
 				"astrolabe.kind":           "eval",
@@ -193,8 +194,14 @@ func TestHandleRunEvalsSkipsRunsOutsideEvalExperimentPrefix(t *testing.T) {
 	h := makeHandlerWithAim(t, aim)
 
 	got := callEvals(t, h, "model-1")
-	if len(got) != 0 {
-		t.Errorf("expected misfiled run to be ignored, got %v", got)
+	if len(got) != 1 {
+		t.Fatalf("expected sidecar-attributed run to be discovered, got %v", got)
+	}
+	if got[0].AimRunHash != "sidecar-attributed" {
+		t.Errorf("expected sidecar-attributed, got %s", got[0].AimRunHash)
+	}
+	if got[0].TaskSet != "glue" {
+		t.Errorf("expected task_set=glue, got %s", got[0].TaskSet)
 	}
 }
 
